@@ -29,7 +29,9 @@ class ScriptUploadMetadata(BaseModel):
 
     name: str = Field(min_length=1, max_length=255)
     script_type: ScriptType
-    version: str = Field(min_length=1, max_length=100)
+    # Version is generated as v1, v2, ... when omitted.  Explicit versions
+    # remain supported for compatibility and are still immutable/unique.
+    version: str | None = Field(default=None, min_length=1, max_length=100)
     supported_model_types: list[ModelType] = Field(min_length=1, max_length=20)
 
     @field_validator("name")
@@ -39,7 +41,9 @@ class ScriptUploadMetadata(BaseModel):
 
     @field_validator("version")
     @classmethod
-    def validate_version(cls, value: str) -> str:
+    def validate_version(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         return _safe_text(value, "version")
 
     @field_validator("supported_model_types")

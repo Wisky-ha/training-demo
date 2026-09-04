@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from backend.app.core.config import Settings
-from backend.app.db.models import ModelTypeORM, ScriptORM
+from backend.app.db.models import FileArtifactORM, ModelTypeORM, ScriptORM
 from backend.app.db.session import create_session_factory, initialize_database, get_session
 from backend.app.domain.enums import ModelType, ScriptStatus, ScriptType
 from backend.app.main import create_app
@@ -146,6 +146,13 @@ def test_upload_rejects_bad_file_or_metadata(api_context, kwargs, status_code):
     assert response.status_code == status_code
 
 
+def test_upload_rejects_python_syntax_errors(api_context):
+    client, _, _ = api_context
+    response = _upload(client, source=b"def broken(:\n    pass\n")
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "INVALID_SCRIPT_FILE"
+
+
 def test_upload_requires_all_metadata_fields(api_context):
     client, _, _ = api_context
     response = client.post(
@@ -189,3 +196,68 @@ def test_upload_rejects_unsafe_metadata_name(api_context):
     client, _, _ = api_context
     response = _upload(client, name="../outside")
     assert response.status_code == 422
+
+
+def test_upload_generates_incrementing_versions_and_keeps_previous_source(api_context):
+    client, factory, storage_root = api_context
+    first = client.post(
+        "/api/scripts/upload",
+        data={
+            "name": "versioned-trainer",
+            "script_type": "trainer",
+            "supported_model_types": json.dumps(["electric_load"]),
+        },
+        files={"file": ("train.py", b"VERSION = 1\n", "text/x-python")},
+    )
+    second = client.post(
+        "/api/scripts/upload",
+        data={
+            "name": "versioned-trainer",
+            "script_type": "trainer",
+            "supported_model_types": json.dumps(["electric_load"]),
+        },
+        files={"file": ("train.py", b"VERSION = 2\n", "text/x-python")},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    first_body, second_body = first.json(), second.json()
+    assert first_body["version"] == "v1"
+    assert second_body["version"] == "v2"
+    assert first_body["source_code"] == "VERSION = 1\n"
+    assert second_body["source_code"] == "VERSION = 2\n"
+    assert first_body["id"] != second_body["id"]
+    with factory() as session:
+        assert session.query(ScriptORM).filter_by(name="versioned-trainer").count() == 2
+        artifacts = session.query(FileArtifactORM).filter_by(artifact_type="script").all()
+        assert {item.artifact_id for item in artifacts} == {first_body["id"], second_body["id"]}
+    assert len(list((storage_root / "script").glob("*.py"))) == 2
+
+
+def test_script_detail_and_enable_disable_endpoints_preserve_source(api_context):
+    client, _, _ = api_context
+    uploaded = _upload(client, source=b"def train():\n    return 42\n").json()
+    script_id = uploaded["id"]
+
+    disabled = client.post(f"/api/scripts/{script_id}/disable")
+    assert disabled.status_code == 200
+    assert disabled.json()["status"] == "DISABLED"
+    assert disabled.json()["source_code"] == uploaded["source_code"]
+
+    detail = client.get(f"/api/scripts/{script_id}")
+    assert detail.status_code == 200
+    assert detail.json()["id"] == script_id
+    assert detail.json()["status"] == "DISABLED"
+    assert detail.json()["source_code"] == uploaded["source_code"]
+
+    enabled = client.post(f"/api/scripts/{script_id}/enable")
+    assert enabled.status_code == 200
+    assert enabled.json()["status"] == "ENABLED"
+    assert client.get("/api/scripts", params={"status": "disabled"}).json()["items"] == []
+
+
+def test_script_management_returns_structured_not_found_error(api_context):
+    client, _, _ = api_context
+    response = client.get("/api/scripts/not-found")
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "SCRIPT_NOT_FOUND"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import re
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel as PydanticModel
@@ -234,6 +235,26 @@ class ScriptRepository(Repository[ScriptORM]):
             ScriptORM.version == version,
         )
         return self.session.scalar(statement) is not None
+
+    def next_version(self, name: str, script_type: ScriptType) -> str:
+        """Return the next generated version for one script identity.
+
+        Versions supplied by callers may use any non-empty label.  Generated
+        versions use the stable ``vN`` form and advance past existing numeric
+        versions, so explicit ``v10`` uploads cannot later be overwritten by
+        an automatically generated version.
+        """
+
+        statement = select(ScriptORM.version).where(
+            ScriptORM.name == name,
+            ScriptORM.script_type == script_type,
+        )
+        highest = 0
+        for version in self.session.scalars(statement):
+            match = re.fullmatch(r"v(\d+)", version.strip(), flags=re.IGNORECASE)
+            if match:
+                highest = max(highest, int(match.group(1)))
+        return f"v{highest + 1}"
 
 
 class DatasetRepository(Repository[DatasetORM]):

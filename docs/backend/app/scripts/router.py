@@ -25,6 +25,7 @@ from ..services.scripts import (
     DuplicateScriptVersionError,
     InvalidScriptFileError,
     InvalidScriptMetadataError,
+    ScriptPersistenceError,
     ScriptService,
     ScriptStorageError,
 )
@@ -48,7 +49,7 @@ def _response(item: ScriptORM) -> dict[str, Any]:
 
 
 def _metadata_or_422(
-    name: str, script_type: str, version: str, supported_model_types: str
+    name: str, script_type: str, version: str | None, supported_model_types: str
 ) -> ScriptUploadMetadata:
     try:
         models = json.loads(supported_model_types)
@@ -75,12 +76,18 @@ def _metadata_or_422(
 async def upload_script(
     request: Request,
     name: str = Form(...),
-    version: str = Form(...),
+    version: str | None = Form(None),
     script_type: str = Form(...),
     supported_model_types: str = Form(...),
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    # FastAPI treats an empty optional form value as ``None``.  Inspect the
+    # multipart payload as well so an explicitly empty version is rejected,
+    # while an omitted version remains eligible for automatic generation.
+    form = await request.form()
+    if version is None and "version" in form:
+        version = ""
     metadata = _metadata_or_422(name, script_type, version, supported_model_types)
     source_bytes = await file.read()
     service = ScriptService(
@@ -110,6 +117,62 @@ async def upload_script(
             "code": "SCRIPT_STORAGE_ERROR", "message": str(exc)
         }) from exc
     return _response(item)
+
+
+def _not_found(script_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={
+            "code": "SCRIPT_NOT_FOUND",
+            "message": f"script not found: {script_id}",
+        },
+    )
+
+
+def _script_response(service: ScriptService, script_id: str) -> dict[str, Any]:
+    item = service.get(script_id)
+    if item is None:
+        raise _not_found(script_id)
+    return service.to_response(item).model_dump(mode="json")
+
+
+@router.get("/{script_id}", response_model=ScriptResponse)
+def get_script(script_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Return one immutable script version and its saved source."""
+
+    return _script_response(ScriptService(session), script_id)
+
+
+@router.post("/{script_id}/enable", response_model=ScriptResponse)
+def enable_script(script_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Make one script version available to future selections."""
+
+    service = ScriptService(session)
+    try:
+        item = service.set_status(script_id, ScriptStatus.ENABLED)
+    except ScriptPersistenceError as exc:
+        raise HTTPException(status_code=500, detail={
+            "code": "SCRIPT_STATUS_UPDATE_ERROR", "message": str(exc)
+        }) from exc
+    if item is None:
+        raise _not_found(script_id)
+    return service.to_response(item).model_dump(mode="json")
+
+
+@router.post("/{script_id}/disable", response_model=ScriptResponse)
+def disable_script(script_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Hide one script version from future selections without deleting it."""
+
+    service = ScriptService(session)
+    try:
+        item = service.set_status(script_id, ScriptStatus.DISABLED)
+    except ScriptPersistenceError as exc:
+        raise HTTPException(status_code=500, detail={
+            "code": "SCRIPT_STATUS_UPDATE_ERROR", "message": str(exc)
+        }) from exc
+    if item is None:
+        raise _not_found(script_id)
+    return service.to_response(item).model_dump(mode="json")
 
 
 @router.get("", response_model=PaginatedScriptsResponse)

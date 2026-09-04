@@ -28,12 +28,13 @@ python -c "from backend.app.main import app; from backend.app.core.config import
 pytest -q backend/tests
 ```
 
-## 脚本库接口（步骤 4）
+## 脚本库接口（步骤 7）
 
-- `POST /api/scripts/upload` 使用 multipart 上传 `file` 和 `name`、`version`、`script_type`、`supported_model_types` 元数据。仅接受 UTF-8、语法有效的 `.py` 文件；新记录默认启用。
+- `POST /api/scripts/upload` 使用 multipart 上传 `file` 和 `name`、`script_type`、`supported_model_types` 元数据；`version` 可选，省略时按同一名称/类型生成递增的 `v1`、`v2`……。仅接受 UTF-8、语法有效的 `.py` 文件；新记录默认启用。
 - `GET /api/scripts` 返回分页的 `items` 和 `pagination`，项目包含名称、版本、脚本类型、适用模型类型、`created_at`/`uploaded_at`、启用状态和源码。默认只列启用脚本；传入 `model_type` 时只列声明兼容该模型的脚本。显式传 `status=disabled` 可供库管理查看停用脚本。
+- `GET /api/scripts/{id}` 查询单个不可变脚本版本；`POST /api/scripts/{id}/enable` 和 `/disable` 管理可用状态，不删除源码或历史版本。
 - 源码使用 UUID 文件名保存到 `APP_SCRIPT_STORAGE_DIR`；未配置时使用 `APP_STORAGE_ROOT`，再回退到模型存储根下的 `script/` 目录。文件名不参与路径拼接，数据库事务失败会清理已写入文件。
-- 同一名称、脚本类型和版本不可重复，非法元数据/文件返回 422/400，重复版本返回 409。
+- 同一名称、脚本类型和版本不可重复，非法元数据/文件返回结构化 422/400，重复版本返回 409。
 
 ## CSV 数据集接口（步骤 5）
 

@@ -35,6 +35,10 @@ class ScriptStorageError(RuntimeError):
     """Raised when source storage cannot complete."""
 
 
+class ScriptPersistenceError(RuntimeError):
+    """Raised when a script-library state change cannot be committed."""
+
+
 _FILENAME_DISALLOWED = re.compile(r'[<>:"|?*]')
 
 
@@ -94,8 +98,11 @@ class ScriptService:
         """Persist one script and compensate the file if the transaction fails."""
 
         source_code = self.validate_source(filename, source)
+        version = metadata.version or self.repository.next_version(
+            metadata.name, metadata.script_type
+        )
         if self.repository.version_exists(
-            metadata.name, metadata.script_type, metadata.version
+            metadata.name, metadata.script_type, version
         ):
             raise DuplicateScriptVersionError(
                 "a script with the same name, type, and version already exists"
@@ -125,7 +132,7 @@ class ScriptService:
                 id=script_id,
                 name=metadata.name,
                 script_type=metadata.script_type,
-                version=metadata.version,
+                version=version,
                 source_code=source_code,
                 supported_model_types=metadata.supported_model_types,
                 status=ScriptStatus.ENABLED,
@@ -155,6 +162,27 @@ class ScriptService:
             if isinstance(exc, (InvalidScriptFileError, DuplicateScriptVersionError)):
                 raise
             raise ScriptStorageError("could not persist the script source") from exc
+
+    def get(self, script_id: str) -> ScriptORM | None:
+        """Return one script version, including its immutable source."""
+
+        return self.repository.get(script_id)
+
+    def set_status(
+        self, script_id: str, status: ScriptStatus
+    ) -> ScriptORM | None:
+        """Enable or disable a version without changing its source/history."""
+
+        script = self.repository.get(script_id)
+        if script is None:
+            return None
+        try:
+            script.status = status
+            self.session.commit()
+        except Exception as exc:
+            self.session.rollback()
+            raise ScriptPersistenceError("could not update script status") from exc
+        return script
 
     def list(
         self,
