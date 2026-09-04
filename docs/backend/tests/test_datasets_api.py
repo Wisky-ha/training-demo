@@ -78,6 +78,15 @@ def test_valid_csv_returns_roles_types_missing_preview_summary_and_persists(data
         )
         assert artifact is not None
         assert artifact.relative_path == dataset.file_path
+        assert dataset.numeric_columns == ["temperature", "load"]
+        assert dataset.time_range == {
+            "start": "2024-01-01T00:00:00",
+            "end": "2024-01-01T02:00:00",
+        }
+        assert dataset.time_parse["success"] is True
+        assert dataset.summary["row_count"] == 3
+        assert body["file_storage"]["size_bytes"] == len(csv)
+        assert body["file_storage"]["checksum_sha256"] == artifact.checksum_sha256
 
 
 def test_upload_rejects_fewer_than_three_columns(dataset_api):
@@ -100,6 +109,52 @@ def test_upload_rejects_non_csv_and_empty_content(dataset_api):
     response = upload(dataset_api[0], b"", "load.csv")
     assert response.status_code == 400
     assert "为空" in response.json()["detail"]
+
+
+def test_upload_rejects_missing_extension_bad_encoding_and_malformed_csv(dataset_api):
+    client = dataset_api[0]
+    valid = b"time,x,target\n2024-01-01,1,2\n2024-01-02,2,3\n"
+
+    response = upload(client, valid, "load")
+    assert response.status_code == 415
+    assert response.json()["errors"][0]["code"] == "UNSUPPORTED_DATASET_FILE"
+
+    response = upload(client, b"\xfftime,x,target\n2024-01-01,1,2\n", "load.csv")
+    assert response.status_code == 400
+    assert response.json()["errors"][0]["code"] == "ENCODING_INVALID"
+
+    response = upload(client, b'time,x,target\n"2024-01-01,1,2\n', "load.csv")
+    assert response.status_code == 400
+    assert response.json()["errors"][0]["code"] == "CSV_FORMAT_INVALID"
+
+
+def test_upload_rejects_inconsistent_csv_row_width(dataset_api):
+    response = upload(
+        dataset_api[0],
+        b"time,x,target\n2024-01-01,1,2,extra\n2024-01-02,2,3\n",
+    )
+    assert response.status_code == 400
+    assert response.json()["errors"][0]["code"] == "COLUMN_COUNT_MISMATCH"
+
+
+def test_upload_bounds_dataset_size_and_keeps_preview_json_safe(dataset_api):
+    client, _, _ = dataset_api
+    # The test app's default limit is intentionally overridden on its state;
+    # the endpoint reads at most limit + 1 bytes.
+    client.app.state.settings.max_dataset_size_bytes = 30
+    response = upload(client, b"time,x,target\n2024-01-01,1,2\n2024-01-02,2,3\n")
+    assert response.status_code == 400
+    assert response.json()["errors"][0]["code"] == "FILE_TOO_LARGE"
+
+    client.app.state.settings.max_dataset_size_bytes = 50 * 1024 * 1024
+    response = upload(
+        client,
+        b"time,x,target\n2024-01-01,Infinity,1\n2024-01-02,NaN,2\n",
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["preview_rows"][0]["x"] == "Infinity"
+    assert body["preview_rows"][1]["x"] is None
 
 
 def test_two_rows_are_the_smallest_valid_80_20_split(dataset_api):

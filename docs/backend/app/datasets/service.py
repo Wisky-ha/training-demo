@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -254,6 +254,8 @@ class DatasetService:
             return value.isoformat() if not pd.isna(value) else None
         if hasattr(value, "item"):
             value = value.item()
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
         if isinstance(value, (float, np.floating)) and not np.isfinite(value):
             return None
         try:
@@ -284,13 +286,31 @@ class DatasetService:
         return converted
 
     @classmethod
+    def _parse_datetimes(cls, series: pd.Series) -> pd.Series:
+        """Parse dates while preserving naive output for naive CSVs.
+
+        A mixed timezone column is normalized to UTC so comparisons and ranges
+        remain deterministic; ordinary local timestamps retain their legacy
+        timezone-naive representation in the response.
+        """
+
+        values = series.astype("string").str.strip()
+        has_timezone = values.str.contains(
+            r"(?:Z|[+-]\d{2}:?\d{2})$", regex=True, na=False
+        ).any()
+        return pd.to_datetime(
+            values,
+            errors="coerce",
+            format="mixed",
+            utc=bool(has_timezone),
+        )
+
+    @classmethod
     def _is_datetime(cls, series: pd.Series) -> bool:
         non_missing = cls._non_missing(series)
         if non_missing.empty:
             return False
-        converted = pd.to_datetime(
-            non_missing.astype(str).str.strip(), errors="coerce", format="mixed"
-        )
+        converted = cls._parse_datetimes(non_missing)
         return not converted.isna().any()
 
     @classmethod
@@ -333,9 +353,7 @@ class DatasetService:
                 }
             )
         elif column_type == "datetime":
-            dates = pd.to_datetime(
-                non_missing.astype(str).str.strip(), errors="coerce", format="mixed"
-            )
+            dates = cls._parse_datetimes(non_missing)
             if not dates.isna().any():
                 summary.update(
                     {
@@ -485,10 +503,8 @@ class DatasetService:
                     count=int(time_missing.sum()),
                 )
             )
-        parsed_times = pd.to_datetime(
-            time_values.where(~time_missing, None).astype("string").str.strip(),
-            errors="coerce",
-            format="mixed",
+        parsed_times = cls._parse_datetimes(
+            time_values.where(~time_missing, None)
         )
         invalid_times = parsed_times.isna() & ~time_missing
         if invalid_times.any():
