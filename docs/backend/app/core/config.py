@@ -79,6 +79,16 @@ class Settings(BaseSettings):
             "APP_APP_MAX_SCRIPT_SIZE_BYTES",
         ),
     )
+    # Dataset uploads are read at most one byte beyond this limit by the HTTP
+    # adapter, keeping malformed/oversized requests from being fully buffered.
+    max_dataset_size_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        gt=0,
+        validation_alias=AliasChoices(
+            "APP_MAX_DATASET_SIZE_BYTES",
+            "APP_APP_MAX_DATASET_SIZE_BYTES",
+        ),
+    )
     allowed_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173"],
         validation_alias=AliasChoices("APP_ALLOWED_ORIGINS", "APP_APP_ALLOWED_ORIGINS"),

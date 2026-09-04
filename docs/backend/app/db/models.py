@@ -196,6 +196,20 @@ class DatasetORM(Base):
     preview_rows: Mapped[list[dict[str, Any]]] = mapped_column(
         MutableList.as_mutable(JSON), nullable=False, default=list
     )
+    # Inspection metadata is persisted with the dataset record so a later
+    # request does not need to re-read and re-parse a potentially large CSV.
+    numeric_columns: Mapped[list[str]] = mapped_column(
+        MutableList.as_mutable(JSON), nullable=False, default=list
+    )
+    time_parse: Mapped[dict[str, Any]] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False, default=dict
+    )
+    time_range: Mapped[dict[str, Any]] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False, default=dict
+    )
+    summary: Mapped[dict[str, Any]] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False, default=dict
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
 
     training_jobs: Mapped[list[TrainingJobORM]] = relationship(

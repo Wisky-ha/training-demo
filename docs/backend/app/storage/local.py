@@ -411,6 +411,11 @@ class FileStorageService:
     def dataset_exists(self, dataset_id: str) -> bool:
         return self.exists(ArtifactType.DATASET, dataset_id)
 
+    def remove_dataset(self, dataset_id: str) -> bool:
+        """Remove a dataset source file and its pending artifact metadata."""
+
+        return self.remove(ArtifactType.DATASET, dataset_id)
+
     def read_script_source(self, script_id: str) -> str:
         try:
             return self.read(ArtifactType.SCRIPT, script_id).decode("utf-8")
@@ -438,6 +443,7 @@ class FileStorageService:
     save_csv = save_dataset
     read_csv = read_dataset
     csv_exists = dataset_exists
+    remove_csv = remove_dataset
 
 
 LocalFileStorage = FileStorageService

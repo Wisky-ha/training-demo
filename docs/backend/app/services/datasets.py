@@ -3,13 +3,17 @@
 from ..datasets.service import (
     CSVParseError,
     DatasetService,
+    DatasetValidationError,
     ParsedDataset,
     UnsupportedDatasetFileError,
+    ValidationIssue,
 )
 
 __all__ = [
     "CSVParseError",
     "DatasetService",
+    "DatasetValidationError",
     "ParsedDataset",
     "UnsupportedDatasetFileError",
+    "ValidationIssue",
 ]

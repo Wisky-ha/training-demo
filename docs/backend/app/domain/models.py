@@ -89,6 +89,10 @@ class DatasetRecord(DomainModel):
     column_types: dict[str, str] = Field(default_factory=dict)
     missing_value_counts: dict[str, int] = Field(default_factory=dict)
     preview_rows: list[dict[str, Any]] = Field(default_factory=list)
+    numeric_columns: list[str] = Field(default_factory=list)
+    time_parse: dict[str, Any] = Field(default_factory=dict)
+    time_range: dict[str, Any] = Field(default_factory=dict)
+    summary: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_utc_now)
 
     @property

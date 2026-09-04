@@ -100,3 +100,89 @@ def test_upload_rejects_non_csv_and_empty_content(dataset_api):
     response = upload(dataset_api[0], b"", "load.csv")
     assert response.status_code == 400
     assert "为空" in response.json()["detail"]
+
+
+def test_two_rows_are_the_smallest_valid_80_20_split(dataset_api):
+    response = upload(
+        dataset_api[0],
+        b"time,feature,target\n2024-01-02,1,10\n2024-01-01,2,20\n",
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["row_count"] == 2
+    assert body["validation"]["valid"] is True
+    assert body["validation"]["checks"]["split"]["train_row_count"] == 1
+    assert body["validation"]["checks"]["split"]["test_row_count"] == 1
+    assert body["time_parse"]["is_sorted"] is False
+    assert body["time_parse"]["out_of_order_count"] == 1
+    assert body["validation"]["warnings"][0]["code"] == "TIME_NOT_SORTED"
+
+
+def test_upload_rejects_a_dataset_without_a_feature_column(dataset_api):
+    response = upload(dataset_api[0], b"time,target\n2024-01-01,1\n2024-01-02,2\n")
+
+    assert response.status_code == 400
+    assert response.json()["errors"][0]["code"] == "COLUMN_COUNT_TOO_SMALL"
+    assert response.json()["errors"][0]["field"] == "columns"
+
+
+def test_upload_rejects_too_few_rows_for_train_and_test(dataset_api):
+    response = upload(dataset_api[0], b"time,feature,target\n2024-01-01,1,1\n")
+
+    assert response.status_code == 400
+    assert response.json()["errors"][0]["code"] == "INSUFFICIENT_ROWS"
+    assert "训练集和测试集" in response.json()["detail"]
+
+
+def test_upload_rejects_missing_time_and_target_values(dataset_api):
+    response = upload(
+        dataset_api[0],
+        b"time,feature,target\n,1,10\n2024-01-02,2,\n",
+    )
+
+    assert response.status_code == 400
+    codes = {error["code"] for error in response.json()["errors"]}
+    assert {"TIME_VALUE_MISSING", "TARGET_VALUE_MISSING"} <= codes
+    assert all(error["column"] in {"time", "target"} for error in response.json()["errors"])
+
+
+def test_upload_rejects_non_numeric_or_non_finite_target_values(dataset_api):
+    response = upload(
+        dataset_api[0],
+        b"time,feature,target\n2024-01-01,1,10\n2024-01-02,2,nope\n",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["errors"][0]["code"] == "TARGET_VALUE_INVALID"
+    assert response.json()["errors"][0]["column"] == "target"
+
+    response = upload(
+        dataset_api[0],
+        b"time,feature,target\n2024-01-01,1,10\n2024-01-02,2,inf\n",
+    )
+    assert response.status_code == 400
+    assert response.json()["errors"][0]["code"] == "TARGET_VALUE_INVALID"
+
+
+def test_upload_rejects_a_feature_column_that_is_entirely_missing(dataset_api):
+    response = upload(
+        dataset_api[0],
+        b"time,feature,target\n2024-01-01,,10\n2024-01-02,,20\n",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["errors"][0]["code"] == "FEATURE_VALUES_EMPTY"
+    assert response.json()["errors"][0]["column"] == "feature"
+
+
+def test_upload_rejects_duplicate_times_and_reports_time_order(dataset_api):
+    response = upload(
+        dataset_api[0],
+        b"time,feature,target\n2024-01-01,1,10\n2024-01-01,2,20\n",
+    )
+
+    assert response.status_code == 400
+    error = response.json()["errors"][0]
+    assert error["code"] == "TIME_DUPLICATE"
+    assert error["field"] == "time"
