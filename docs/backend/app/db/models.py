@@ -13,7 +13,10 @@ from uuid import uuid4
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
+    Column,
     DateTime,
+    Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
@@ -22,14 +25,15 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
-    Column,
-    Enum as SAEnum,
+    text,
 )
 from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from ..domain.enums import (
     AlertStatus,
+    DatasetStatus,
+    HealthStatus,
     ModelType,
     ModelVersionStatus,
     RollbackStatus,
@@ -91,7 +95,14 @@ class ModelTypeORM(Base):
     code: Mapped[ModelType] = mapped_column(_enum_column(ModelType), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     current_version_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("model_versions.id", ondelete="SET NULL"), nullable=True
+        String(36),
+        ForeignKey(
+            "model_versions.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_model_types_current_version",
+        ),
+        nullable=True,
     )
     alert_status: Mapped[AlertStatus] = mapped_column(
         _enum_column(AlertStatus), nullable=False, default=AlertStatus.RESOLVED
@@ -159,11 +170,18 @@ class ScriptORM(Base):
 
 class DatasetORM(Base):
     __tablename__ = "datasets"
-    __table_args__ = (Index("ix_datasets_created_at", "created_at"),)
+    __table_args__ = (
+        CheckConstraint("row_count >= 0", name="ck_datasets_row_count_nonnegative"),
+        Index("ix_datasets_status_created_at", "status", "created_at"),
+        Index("ix_datasets_created_at", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
     file_name: Mapped[str] = mapped_column(String(255), nullable=False)
     file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    status: Mapped[DatasetStatus] = mapped_column(
+        _enum_column(DatasetStatus), nullable=False, default=DatasetStatus.PARSED
+    )
     row_count: Mapped[int] = mapped_column(Integer, nullable=False)
     columns: Mapped[list[str]] = mapped_column(MutableList.as_mutable(JSON), nullable=False)
     time_column: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -185,11 +203,76 @@ class DatasetORM(Base):
     )
 
 
+class FileArtifactORM(Base):
+    """Metadata for a file kept by the local artifact storage service.
+
+    The path is always relative to the configured storage root.  Keeping one
+    table for all artifact kinds makes integrity checks and future storage
+    backends independent from the workflow tables that reference the files.
+    """
+
+    __tablename__ = "file_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "artifact_type",
+            "artifact_id",
+            name="uq_file_artifacts_type_id",
+        ),
+        Index("ix_file_artifacts_type_id", "artifact_type", "artifact_id"),
+        Index("ix_file_artifacts_checksum", "checksum_sha256"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    artifact_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    artifact_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    relative_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False
+    )
+
+    # Readable compatibility aliases for callers using generic file metadata
+    # terminology.  The canonical persisted names remain explicit above.
+    @property
+    def file_size(self) -> int:
+        return self.size_bytes
+
+    @property
+    def checksum(self) -> str:
+        return self.checksum_sha256
+
+    @property
+    def size(self) -> int:
+        return self.size_bytes
+
+    @property
+    def sha256(self) -> str:
+        return self.checksum_sha256
+
+    @property
+    def identifier(self) -> str:
+        return self.artifact_id
+
+
 class TrainingJobORM(Base):
     __tablename__ = "training_jobs"
     __table_args__ = (
+        CheckConstraint(
+            "split_ratio > 0 AND split_ratio < 1 AND test_ratio > 0 AND test_ratio < 1 "
+            "AND abs((split_ratio + test_ratio) - 1.0) < 0.000001",
+            name="ck_training_jobs_split_ratios_valid",
+        ),
+        CheckConstraint(
+            "(train_row_count IS NULL OR train_row_count >= 0) AND "
+            "(test_row_count IS NULL OR test_row_count >= 0)",
+            name="ck_training_jobs_row_counts_nonnegative",
+        ),
         Index("ix_training_jobs_model_type_status", "model_type", "status"),
         Index("ix_training_jobs_dataset_id", "dataset_id"),
+        Index("ix_training_jobs_train_script_id", "train_script_id"),
+        Index("ix_training_jobs_preprocess_script_id", "preprocess_script_id"),
         Index("ix_training_jobs_created_at", "created_at"),
     )
 
@@ -215,6 +298,7 @@ class TrainingJobORM(Base):
         _enum_column(TrainingJobStatus), nullable=False, default=TrainingJobStatus.PENDING
     )
     progress_stage: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    stage_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     logs: Mapped[list[str]] = mapped_column(MutableList.as_mutable(JSON), nullable=False, default=list)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     train_row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -246,8 +330,15 @@ class ModelVersionORM(Base):
     __table_args__ = (
         UniqueConstraint("model_type", "version", name="uq_model_versions_type_version"),
         Index("ix_model_versions_model_type", "model_type"),
+        Index("ix_model_versions_training_job_id", "training_job_id"),
         Index("ix_model_versions_status", "status"),
-        Index("ix_model_versions_current", "model_type", "is_current"),
+        Index(
+            "uq_model_versions_one_current",
+            "model_type",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+        ),
+        Index("ix_model_versions_health_status", "health_status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
@@ -289,6 +380,9 @@ class ModelVersionORM(Base):
     status: Mapped[ModelVersionStatus] = mapped_column(
         _enum_column(ModelVersionStatus), nullable=False, default=ModelVersionStatus.DRAFT
     )
+    health_status: Mapped[HealthStatus] = mapped_column(
+        _enum_column(HealthStatus), nullable=False, default=HealthStatus.HEALTHY
+    )
     is_baseline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     previous_healthy_version_id: Mapped[str | None] = mapped_column(
@@ -313,6 +407,16 @@ class ModelVersionORM(Base):
     superseding_versions: Mapped[list[ModelVersionORM]] = relationship(
         "ModelVersionORM", back_populates="previous_healthy_version"
     )
+    publish_records: Mapped[list[PublishRecordORM]] = relationship(
+        "PublishRecordORM",
+        foreign_keys="PublishRecordORM.model_version_id",
+        back_populates="model_version",
+    )
+    previous_publish_records: Mapped[list[PublishRecordORM]] = relationship(
+        "PublishRecordORM",
+        foreign_keys="PublishRecordORM.previous_current_version_id",
+        back_populates="previous_current_version",
+    )
     alerts: Mapped[list[ModelAlertORM]] = relationship(
         "ModelAlertORM", foreign_keys="ModelAlertORM.model_version_id", back_populates="model_version"
     )
@@ -330,11 +434,54 @@ class ModelVersionORM(Base):
     )
 
 
+class PublishRecordORM(Base):
+    """Immutable history of a successful model publication."""
+
+    __tablename__ = "publish_records"
+    __table_args__ = (
+        Index("ix_publish_records_model_version_id", "model_version_id"),
+        Index("ix_publish_records_published_at", "published_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    model_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("model_versions.id"), nullable=False
+    )
+    # Keep the displayed version as an audit snapshot, even if presentation
+    # rules for version strings change in a future release.
+    published_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    previous_current_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("model_versions.id"), nullable=True
+    )
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    model_version: Mapped[ModelVersionORM] = relationship(
+        "ModelVersionORM",
+        foreign_keys=[model_version_id],
+        back_populates="publish_records",
+    )
+    previous_current_version: Mapped[ModelVersionORM | None] = relationship(
+        "ModelVersionORM",
+        foreign_keys=[previous_current_version_id],
+        back_populates="previous_publish_records",
+    )
+
+
 class ModelAlertORM(Base):
     __tablename__ = "model_alerts"
     __table_args__ = (
         Index("ix_model_alerts_model_type_status", "model_type", "status"),
+        Index("ix_model_alerts_model_version_id", "model_version_id"),
         Index("ix_model_alerts_created_at", "created_at"),
+        Index(
+            "uq_model_alerts_one_active_per_type",
+            "model_type",
+            unique=True,
+            sqlite_where=text("status = 'ACTIVE'"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
@@ -375,6 +522,7 @@ class RollbackRecordORM(Base):
     __table_args__ = (
         Index("ix_rollback_records_model_type_created_at", "model_type", "created_at"),
         Index("ix_rollback_records_status", "status"),
+        Index("ix_rollback_records_alert_id", "alert_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
@@ -410,8 +558,12 @@ class RollbackRecordORM(Base):
 ModelTypeModel = ModelTypeORM
 ScriptModel = ScriptORM
 DatasetModel = DatasetORM
+FileArtifactModel = FileArtifactORM
 TrainingJobModel = TrainingJobORM
 ModelVersionModel = ModelVersionORM
+PublishRecordModel = PublishRecordORM
+ModelReleaseORM = PublishRecordORM
+ReleaseRecordORM = PublishRecordORM
 ModelAlertModel = ModelAlertORM
 RollbackModel = RollbackRecordORM
 
@@ -421,15 +573,21 @@ __all__ = [
     "ModelTypeORM",
     "ScriptORM",
     "DatasetORM",
+    "FileArtifactORM",
     "TrainingJobORM",
     "ModelVersionORM",
+    "PublishRecordORM",
+    "ModelReleaseORM",
+    "ReleaseRecordORM",
     "ModelAlertORM",
     "RollbackRecordORM",
     "ModelTypeModel",
     "ScriptModel",
     "DatasetModel",
+    "FileArtifactModel",
     "TrainingJobModel",
     "ModelVersionModel",
+    "PublishRecordModel",
     "ModelAlertModel",
     "RollbackModel",
 ]

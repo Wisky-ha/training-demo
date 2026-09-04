@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from ..domain.enums import (
     AlertStatus,
+    DatasetStatus,
+    HealthStatus,
     ModelType,
     ModelVersionStatus,
     RollbackStatus,
@@ -21,9 +23,11 @@ from ..domain.enums import (
 )
 from .models import (
     DatasetORM,
+    FileArtifactORM,
     ModelAlertORM,
     ModelTypeORM,
     ModelVersionORM,
+    PublishRecordORM,
     RollbackRecordORM,
     ScriptORM,
     TrainingJobORM,
@@ -72,15 +76,19 @@ class Repository(Generic[ORMModel]):
             "code": ModelType,
             "model_type": ModelType,
             "script_type": ScriptType,
-            "script_status": ScriptStatus,
             "status": {
+                DatasetORM: DatasetStatus,
                 ModelTypeORM: AlertStatus,
                 ScriptORM: ScriptStatus,
                 TrainingJobORM: TrainingJobStatus,
                 ModelVersionORM: ModelVersionStatus,
                 ModelAlertORM: AlertStatus,
                 RollbackRecordORM: RollbackStatus,
+                PublishRecordORM: None,
             }.get(self.model),
+            "health_status": HealthStatus,
+            "script_type": ScriptType,
+            "script_status": ScriptStatus,
             "split_strategy": SplitStrategy,
         }
         for field, enum_class in enum_fields.items():
@@ -175,8 +183,45 @@ class TrainingJobRepository(Repository[TrainingJobORM]):
     model = TrainingJobORM
 
 
+class FileArtifactRepository(Repository[FileArtifactORM]):
+    model = FileArtifactORM
+
+    def get_for_artifact(self, artifact_type: str, artifact_id: str) -> FileArtifactORM | None:
+        """Return metadata for one logical artifact."""
+
+        return self.get_by(artifact_type=artifact_type, artifact_id=artifact_id)
+
+    def upsert(
+        self,
+        *,
+        artifact_type: str,
+        artifact_id: str,
+        relative_path: str,
+        size_bytes: int,
+        checksum_sha256: str,
+    ) -> FileArtifactORM:
+        """Create or replace metadata without committing the caller's transaction."""
+
+        item = self.get_for_artifact(artifact_type, artifact_id)
+        values = {
+            "artifact_type": artifact_type,
+            "artifact_id": artifact_id,
+            "relative_path": relative_path,
+            "size_bytes": size_bytes,
+            "checksum_sha256": checksum_sha256,
+        }
+        if item is None:
+            return self.create(**values)
+        self.update(item, values)
+        return item
+
+
 class ModelVersionRepository(Repository[ModelVersionORM]):
     model = ModelVersionORM
+
+
+class PublishRecordRepository(Repository[PublishRecordORM]):
+    model = PublishRecordORM
 
 
 class ModelAlertRepository(Repository[ModelAlertORM]):
@@ -192,7 +237,9 @@ ModelTypesRepository = ModelTypeRepository
 ScriptsRepository = ScriptRepository
 DatasetsRepository = DatasetRepository
 TrainingJobsRepository = TrainingJobRepository
+FileArtifactsRepository = FileArtifactRepository
 ModelVersionsRepository = ModelVersionRepository
+PublishRecordsRepository = PublishRecordRepository
 ModelAlertsRepository = ModelAlertRepository
 RollbackRecordsRepository = RollbackRepository
 
@@ -202,14 +249,18 @@ __all__ = [
     "ScriptRepository",
     "DatasetRepository",
     "TrainingJobRepository",
+    "FileArtifactRepository",
     "ModelVersionRepository",
+    "PublishRecordRepository",
     "ModelAlertRepository",
     "RollbackRepository",
     "ModelTypesRepository",
     "ScriptsRepository",
     "DatasetsRepository",
     "TrainingJobsRepository",
+    "FileArtifactsRepository",
     "ModelVersionsRepository",
+    "PublishRecordsRepository",
     "ModelAlertsRepository",
     "RollbackRecordsRepository",
 ]

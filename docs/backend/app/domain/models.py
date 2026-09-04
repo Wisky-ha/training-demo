@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .enums import (
     AlertStatus,
+    DatasetStatus,
+    HealthStatus,
     ModelType,
     ModelVersionStatus,
     RollbackStatus,
@@ -78,6 +80,7 @@ class DatasetRecord(DomainModel):
     id: str = Field(default_factory=_new_id)
     file_name: str = Field(min_length=1)
     file_path: str | None = None
+    status: DatasetStatus = DatasetStatus.PARSED
     row_count: int = Field(ge=0)
     columns: list[str] = Field(min_length=3)
     time_column: str = Field(min_length=1)
@@ -109,6 +112,7 @@ class TrainingJob(DomainModel):
     test_ratio: float = Field(default=0.2, gt=0, lt=1)
     status: TrainingJobStatus = TrainingJobStatus.PENDING
     progress_stage: str | None = None
+    stage_started_at: datetime | None = None
     logs: list[str] = Field(default_factory=list)
     error_message: str | None = None
     train_row_count: int | None = Field(default=None, ge=0)
@@ -153,11 +157,23 @@ class ModelVersion(DomainModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
 
     status: ModelVersionStatus = ModelVersionStatus.DRAFT
+    health_status: HealthStatus = HealthStatus.HEALTHY
     is_baseline: bool = False
     is_current: bool = False
     previous_healthy_version_id: str | None = None
     created_at: datetime = Field(default_factory=_utc_now)
     published_at: datetime | None = None
+
+
+class PublishRecord(DomainModel):
+    """Immutable audit entry for making a model version current."""
+
+    id: str = Field(default_factory=_new_id)
+    model_version_id: str = Field(min_length=1)
+    published_version: str = Field(min_length=1)
+    previous_current_version_id: str | None = None
+    published_at: datetime = Field(default_factory=_utc_now)
+    message: str | None = None
 
 
 class ModelAlert(DomainModel):
@@ -197,4 +213,6 @@ TrainingJobRecord = TrainingJob
 ModelVersionRecord = ModelVersion
 Alert = ModelAlert
 AlertRecord = ModelAlert
+ModelRelease = PublishRecord
+ReleaseRecord = PublishRecord
 Rollback = RollbackRecord

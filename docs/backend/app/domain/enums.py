@@ -25,6 +25,21 @@ class ScriptStatus(str, Enum):
     DISABLED = "DISABLED"
 
 
+class DatasetStatus(str, Enum):
+    """Parsing state of an uploaded dataset record."""
+
+    UPLOADED = "uploaded"
+    PARSED = "parsed"
+    FAILED = "failed"
+
+
+class HealthStatus(str, Enum):
+    """Operational health of a model version independent of its lifecycle."""
+
+    HEALTHY = "HEALTHY"
+    ABNORMAL = "ABNORMAL"
+
+
 class SplitStrategy(str, Enum):
     """Dataset split strategy persisted with a training job/version."""
 
