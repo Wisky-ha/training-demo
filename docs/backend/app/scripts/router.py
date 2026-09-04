@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from ..db.models import ScriptORM
 from ..db.session import get_session
 from ..domain.enums import ModelType, ScriptStatus, ScriptType
 from ..schemas.scripts import (
