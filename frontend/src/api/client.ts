@@ -11,22 +11,22 @@ import type {
   ListAlertsParams,
   ListModelsParams,
   ListScriptsParams,
-  MarkModelAbnormalRequest,
-  MarkModelAbnormalResponse,
   ModelAlert,
   ModelEvaluation,
   ModelTypeContract,
   ModelTypeCode,
   ModelVersionDetail,
   ModelVersionSummary,
+  LifecycleOperationResponse,
   PaginatedResponse,
   PredictionRequest,
   PredictionResponse,
   PublishModelRequest,
   PublishModelResponse,
+  PublishRecord,
   ModelSaveRequest,
   RollbackModelRequest,
-  RollbackResponse,
+  RollbackRecord,
   ScriptContract,
   ScriptUploadInput,
   TrainingJob,
@@ -137,6 +137,121 @@ function toErrorResponse(payload: unknown, status: number): ApiError {
     code: status ? 'UNKNOWN_ERROR' : 'NETWORK_ERROR',
     details: asJsonValue(payload),
   })
+}
+
+const MODEL_STATUSES: ModelVersionSummary['status'][] = [
+  'DRAFT', 'TRAINING', 'READY', 'PUBLISHED', 'RETIRED', 'ABNORMAL', 'FAILED',
+]
+
+function normalizeModel(value: unknown): ModelVersionSummary | null {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.model_type !== 'string' || typeof value.version !== 'string') {
+    return null
+  }
+  const status = String(value.status ?? 'READY').toUpperCase() as ModelVersionSummary['status']
+  const healthStatus = typeof value.health_status === 'string' ? value.health_status.toUpperCase() : typeof value.healthStatus === 'string' ? value.healthStatus.toUpperCase() : 'HEALTHY'
+  const metrics = value.metrics === null ? null : isRecord(value.metrics) ? value.metrics as Record<string, JsonValue> : {}
+  const trainScript = isRecord(value.train_script) && typeof value.train_script.id === 'string' && typeof value.train_script.name === 'string' && typeof value.train_script.version === 'string'
+    ? { id: value.train_script.id, name: value.train_script.name, version: value.train_script.version } : null
+  const preprocessScript = isRecord(value.preprocess_script) && typeof value.preprocess_script.id === 'string' && typeof value.preprocess_script.name === 'string' && typeof value.preprocess_script.version === 'string'
+    ? { id: value.preprocess_script.id, name: value.preprocess_script.name, version: value.preprocess_script.version } : null
+  return {
+    id: value.id,
+    model_type: value.model_type as ModelVersionSummary['model_type'],
+    version: value.version,
+    status: MODEL_STATUSES.includes(status) ? status : 'READY',
+    health_status: healthStatus,
+    is_baseline: value.is_baseline === true,
+    is_current: value.is_current === true,
+    is_abnormal: value.is_abnormal === true || healthStatus === 'ABNORMAL',
+    is_rollback_available: value.is_rollback_available === true,
+    metrics,
+    model_path: typeof value.model_path === 'string' ? value.model_path : null,
+    preprocessor_path: typeof value.preprocessor_path === 'string' ? value.preprocessor_path : null,
+    training_job_id: typeof value.training_job_id === 'string' ? value.training_job_id : null,
+    train_script_id: typeof value.train_script_id === 'string' ? value.train_script_id : null,
+    train_script_version: typeof value.train_script_version === 'string' ? value.train_script_version : null,
+    preprocess_script_id: typeof value.preprocess_script_id === 'string' ? value.preprocess_script_id : null,
+    preprocess_script_version: typeof value.preprocess_script_version === 'string' ? value.preprocess_script_version : null,
+    previous_healthy_version_id: typeof value.previous_healthy_version_id === 'string' ? value.previous_healthy_version_id : null,
+    train_script: trainScript,
+    preprocess_script: preprocessScript,
+    preprocess_used: value.preprocess_used === true,
+    feature_columns: Array.isArray(value.feature_columns) ? value.feature_columns.filter((item): item is string => typeof item === 'string') : [],
+    time_column: typeof value.time_column === 'string' ? value.time_column : null,
+    target_column: typeof value.target_column === 'string' ? value.target_column : null,
+    created_at: typeof value.created_at === 'string' ? value.created_at : '',
+    published_at: typeof value.published_at === 'string' ? value.published_at : null,
+  }
+}
+
+function normalizeDetail(value: unknown): ModelVersionDetail | null {
+  const model = normalizeModel(value)
+  if (!model) return null
+  const source = isRecord(value) ? value : {}
+  return {
+    ...model,
+    input_schema: isRecord(source.input_schema) ? source.input_schema as Record<string, JsonValue> : {},
+    previous_healthy_version_id: model.previous_healthy_version_id ?? null,
+    evaluation: isRecord(source.evaluation) ? source.evaluation as ModelEvaluation : null,
+  }
+}
+
+function normalizeAlert(value: unknown): ModelAlert | null {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.model_type !== 'string') return null
+  const status = String(value.status ?? 'ACTIVE').toUpperCase()
+  return {
+    id: value.id,
+    model_type: value.model_type as ModelAlert['model_type'],
+    model_version_id: typeof value.model_version_id === 'string' ? value.model_version_id : null,
+    reason: typeof value.reason === 'string' ? value.reason : '未提供异常原因',
+    rollback_from: typeof value.rollback_from === 'string' ? value.rollback_from : null,
+    rollback_to: typeof value.rollback_to === 'string' ? value.rollback_to : null,
+    status: status === 'RESOLVED' ? 'RESOLVED' : 'ACTIVE',
+    created_at: typeof value.created_at === 'string' ? value.created_at : '',
+    resolved_at: typeof value.resolved_at === 'string' ? value.resolved_at : null,
+  }
+}
+
+function normalizePublishRecord(value: unknown): PublishRecord | null {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.model_version_id !== 'string' || typeof value.published_version !== 'string') return null
+  return {
+    id: value.id,
+    model_version_id: value.model_version_id,
+    published_version: value.published_version,
+    previous_current_version_id: typeof value.previous_current_version_id === 'string' ? value.previous_current_version_id : null,
+    published_at: typeof value.published_at === 'string' ? value.published_at : '',
+    message: typeof value.message === 'string' ? value.message : null,
+  }
+}
+
+function normalizeRollback(value: unknown): RollbackRecord | null {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.model_type !== 'string') return null
+  const from = typeof value.rollback_from === 'string' ? value.rollback_from : typeof value.from_version_id === 'string' ? value.from_version_id : null
+  const to = typeof value.rollback_to === 'string' ? value.rollback_to : typeof value.to_version_id === 'string' ? value.to_version_id : null
+  return {
+    id: value.id,
+    model_type: value.model_type as RollbackRecord['model_type'],
+    rollback_from: from,
+    rollback_to: to,
+    from_version_id: from,
+    to_version_id: to,
+    alert_id: typeof value.alert_id === 'string' ? value.alert_id : null,
+    reason: typeof value.reason === 'string' ? value.reason : null,
+    status: typeof value.status === 'string' ? value.status.toUpperCase() as RollbackRecord['status'] : undefined,
+    created_at: typeof value.created_at === 'string' ? value.created_at : '',
+    finished_at: typeof value.finished_at === 'string' ? value.finished_at : null,
+  }
+}
+
+function normalizeOperation(value: unknown, fallbackOperation: string): LifecycleOperationResponse {
+  const source = isRecord(value) ? value : {}
+  const model = normalizeDetail(source.model ?? source.current_model ?? value)
+  if (!model) throw new ApiError('API 返回的模型版本数据无效', { status: 200, code: 'INVALID_RESPONSE' })
+  const operation = typeof source.operation === 'string' ? source.operation : fallbackOperation
+  const rollbackSource = source.rollback ?? source.record
+  const rollback = rollbackSource === null || rollbackSource === undefined ? null : normalizeRollback(rollbackSource)
+  const alert = source.alert === null || source.alert === undefined ? null : normalizeAlert(source.alert)
+  return { operation, model, rollback, alert }
 }
 
 export class ApiClient {
@@ -323,10 +438,15 @@ export class ApiClient {
     id: EntityId,
     input: PublishModelRequest = {},
   ): Promise<PublishModelResponse> {
-    return this.postJson<PublishModelResponse, PublishModelRequest>(
+    return this.postJson<unknown>(
       `models/${encodeURIComponent(id)}/publish`,
-      { ...input, confirmed: input.confirmed ?? input.confirm ?? true },
-    )
+      { ...input, confirmed: input.confirmed ?? input.confirm ?? false },
+    ).then((payload) => {
+      const operation = normalizeOperation(payload, 'publish')
+      const source = isRecord(payload) ? payload : {}
+      const record = normalizePublishRecord(source.record)
+      return { model: operation.model, operation: operation.operation, ...(record ? { record } : {}) } satisfies PublishModelResponse
+    })
   }
 
   listModels(params?: ListModelsParams): Promise<ModelVersionSummary[]> {
@@ -336,28 +456,53 @@ export class ApiClient {
       const rows = Array.isArray(payload)
         ? payload
         : isRecord(payload) && Array.isArray(payload.items) ? payload.items : []
-      return rows as ModelVersionSummary[]
+      return rows.map(normalizeModel).filter((item): item is ModelVersionSummary => item !== null)
     })
   }
 
   getModel(id: EntityId): Promise<ModelVersionDetail> {
-    return this.get<ModelVersionDetail>(`models/${encodeURIComponent(id)}`)
+    return this.get<unknown>(`models/${encodeURIComponent(id)}`).then((payload) => {
+      const model = normalizeDetail(payload)
+      if (!model) throw new ApiError('API 返回的模型版本详情无效', { status: 200, code: 'INVALID_RESPONSE' })
+      return model
+    })
   }
 
+  /** The backend accepts either a target id/version or an empty body (path target). */
   rollbackModel(
     id: EntityId,
     input: RollbackModelRequest = {},
-  ): Promise<RollbackResponse> {
-    return this.postJson<RollbackResponse, RollbackModelRequest>(
+  ): Promise<LifecycleOperationResponse> {
+    return this.postJson<unknown>(
       `models/${encodeURIComponent(id)}/rollback`,
       input,
-    )
+    ).then((payload) => normalizeOperation(payload, 'rollback'))
   }
 
-  markModelAbnormal(
-    input: MarkModelAbnormalRequest,
-  ): Promise<MarkModelAbnormalResponse> {
-    return this.postJson<MarkModelAbnormalResponse, MarkModelAbnormalRequest>('models/abnormal', input)
+  /** Offline is the backend's name for retiring a published version. */
+  offlineModel(id: EntityId): Promise<LifecycleOperationResponse> {
+    return this.postJson<unknown>(`models/${encodeURIComponent(id)}/offline`)
+      .then((payload) => normalizeOperation(payload, 'offline'))
+  }
+
+  getModelRollbackRecords(id: EntityId): Promise<RollbackRecord[]> {
+    return this.get<unknown>(`models/${encodeURIComponent(id)}/rollback-records`).then((payload) => {
+      const rows = Array.isArray(payload) ? payload : isRecord(payload) && Array.isArray(payload.items) ? payload.items : []
+      return rows.map(normalizeRollback).filter((item): item is RollbackRecord => item !== null)
+    })
+  }
+
+  getModelPublishRecords(id: EntityId): Promise<PublishRecord[]> {
+    return this.get<unknown>(`models/${encodeURIComponent(id)}/publish-records`).then((payload) => {
+      const rows = Array.isArray(payload) ? payload : isRecord(payload) && Array.isArray(payload.items) ? payload.items : []
+      return rows.map(normalizePublishRecord).filter((item): item is PublishRecord => item !== null)
+    })
+  }
+
+  /** Uses the implemented lifecycle endpoint, rather than the undocumented MCP alias. */
+  markModelAbnormal(id: EntityId, reason = '健康检查异常'): Promise<LifecycleOperationResponse> {
+    return this.postJson<unknown>(`models/${encodeURIComponent(id)}/abnormal`, { reason })
+      .then((payload) => normalizeOperation(payload, 'abnormal'))
   }
 
   listAlerts(params?: ListAlertsParams): Promise<ModelAlert[]> {
@@ -367,7 +512,7 @@ export class ApiClient {
       const rows = Array.isArray(payload)
         ? payload
         : isRecord(payload) && Array.isArray(payload.items) ? payload.items : []
-      return rows as ModelAlert[]
+      return rows.map(normalizeAlert).filter((item): item is ModelAlert => item !== null)
     })
   }
 

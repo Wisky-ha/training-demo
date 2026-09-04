@@ -27,7 +27,9 @@ export const MODEL_TYPE_NAMES: Record<ModelTypeCode, string> = {
   integrated_energy: '综合能耗预测',
 }
 
-export type AlertStatus = 'healthy' | 'active' | 'resolved'
+/** Model-type alert status used by the current backend (uppercase values are canonical). */
+export type AlertStatus = 'ACTIVE' | 'RESOLVED' | 'healthy' | 'active' | 'resolved'
+export type HealthStatus = 'HEALTHY' | 'ABNORMAL' | 'healthy' | 'abnormal'
 export type ModelTypeStatus =
   | 'untrained'
   | 'training'
@@ -374,18 +376,27 @@ export interface ModelVersionSummary {
   model_type: ModelTypeCode
   version: string
   status: ModelVersionStatus
-  health_status?: string
+  health_status?: HealthStatus | string
   is_baseline: boolean
   is_current: boolean
   is_abnormal?: boolean
   is_rollback_available?: boolean
   metrics: EvaluationMetrics | Record<string, JsonValue> | null
+  preprocess_used?: boolean
+  model_path?: string | null
+  preprocessor_path?: string | null
   training_job_id?: EntityId | null
   train_script_id?: EntityId | null
+  train_script_version?: string | null
   preprocess_script_id?: EntityId | null
+  preprocess_script_version?: string | null
   previous_healthy_version_id?: EntityId | null
   train_script?: Pick<ScriptContract, 'id' | 'name' | 'version'> | null
   preprocess_script?: Pick<ScriptContract, 'id' | 'name' | 'version'> | null
+  input_schema?: InputSchema | Record<string, JsonValue>
+  feature_columns?: string[]
+  time_column?: string | null
+  target_column?: string | null
   created_at: IsoDateTime
   published_at: IsoDateTime | null
 }
@@ -395,10 +406,10 @@ export interface ModelVersionDetail extends ModelVersionSummary {
   preprocessor_path?: string | null
   train_script_snapshot?: ScriptSnapshot | null
   preprocess_script_snapshot?: ScriptSnapshot | null
-  input_schema: InputSchema
-  split: DatasetSplitSummary
-  train_data_summary: DataSummary
-  test_data_summary: DataSummary
+  input_schema?: InputSchema | Record<string, JsonValue>
+  split?: DatasetSplitSummary | null
+  train_data_summary?: DataSummary | null
+  test_data_summary?: DataSummary | null
   previous_healthy_version_id: EntityId | null
   evaluation?: ModelEvaluation | null
 }
@@ -445,13 +456,22 @@ export interface PublishModelResponse {
   operation?: string
 }
 
+export type RollbackStatus = 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'pending' | 'succeeded' | 'failed'
+
+/** Wire-compatible with the backend's rollback_from/rollback_to response. */
 export interface RollbackRecord {
   id: EntityId
   model_type: ModelTypeCode
-  from_version_id: EntityId | null
-  to_version_id: EntityId
+  rollback_from: EntityId | null
+  rollback_to: EntityId | null
+  alert_id?: EntityId | null
   reason?: string | null
+  status?: RollbackStatus
   created_at: IsoDateTime
+  finished_at?: IsoDateTime | null
+  /** Legacy aliases retained for older API responses. */
+  from_version_id?: EntityId | null
+  to_version_id?: EntityId | null
 }
 
 export interface RollbackModelRequest {
@@ -459,9 +479,13 @@ export interface RollbackModelRequest {
   reason?: string
 }
 
+/** Compatibility shape for older rollback consumers and current lifecycle responses. */
 export interface RollbackResponse {
-  current_model: ModelVersionSummary
-  record: RollbackRecord
+  operation?: string
+  model?: ModelVersionDetail | ModelVersionSummary
+  rollback?: RollbackRecord | null
+  current_model?: ModelVersionSummary
+  record?: RollbackRecord
 }
 
 export type ModelAlertState = 'ACTIVE' | 'RESOLVED'
@@ -469,7 +493,7 @@ export type ModelAlertState = 'ACTIVE' | 'RESOLVED'
 export interface ModelAlert {
   id: EntityId
   model_type: ModelTypeCode
-  model_version_id: EntityId
+  model_version_id: EntityId | null
   reason: string
   rollback_from: EntityId | null
   rollback_to: EntityId | null
@@ -507,8 +531,11 @@ export interface PredictionResponse {
 
 export interface HealthResponse {
   status: 'ok'
-  service: string
-  database: 'ok'
+  /** Present in the older health contract; current backend returns environment/app_name. */
+  service?: string
+  database?: 'ok'
+  environment?: string
+  app_name?: string
 }
 
 export interface PageParams {
@@ -542,6 +569,7 @@ export interface ListModelsParams extends PageParams {
 export interface ListAlertsParams extends PageParams {
   model_type?: ModelTypeCode
   status?: ModelAlertState
+  active_only?: boolean
 }
 
 export type ApiErrorCode =
@@ -558,6 +586,14 @@ export type ApiErrorCode =
   | 'VALIDATION_ERROR'
   | 'NETWORK_ERROR'
   | 'UNKNOWN_ERROR'
+
+export interface LifecycleOperationResponse {
+  operation: string
+  model: ModelVersionDetail | ModelVersionSummary
+  rollback?: RollbackRecord | null
+  alert?: ModelAlert | null
+  [key: string]: JsonValue | ModelVersionDetail | ModelVersionSummary | RollbackRecord | ModelAlert | undefined
+}
 
 export interface ApiErrorResponse {
   success: false
