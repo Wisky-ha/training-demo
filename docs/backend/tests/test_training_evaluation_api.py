@@ -123,7 +123,59 @@ def train(X_train, y_train, X_test, y_test, config): return Model()
     assert body["chart_sampled"] is True
     assert body["chart_data"][0]["time"] == "2024-01-09T00:00:00"
     assert body["error_data"][0]["time"] == body["chart_data"][0]["time"]
+    assert len(body["test_time_series"]) == len(body["actual_values"]) == 2
+    assert len(body["candidate_predictions"]) == len(body["baseline_predictions"]) == 2
+    assert len(body["candidate_errors"]) == len(body["baseline_errors"]) == 2
+    assert body["actual_values"] == [0.0, 10.0]
+    assert body["candidate_predictions"] == [0.0, 0.0]
+    assert body["candidate_errors"] == [0.0, 10.0]
+    assert body["model_metrics"]["candidate"]["sample_count"] == 2
+    assert body["model_metrics"]["baseline"]["sample_count"] == 2
+    assert body["metric_differences"]["mae"] == pytest.approx(
+        body["model_metrics"]["candidate"]["mae"] - body["model_metrics"]["baseline"]["mae"]
+    )
     assert body["model_comparison"]["candidate"]["model_version_id"] == job["model_version_id"]
+    assert body["model_comparison"]["baseline"]["model_version_id"] == job["config_summary"]["baseline"]["model_version_id"]
+
+
+def test_published_model_is_evaluated_as_baseline_on_same_test_set(api):
+    client, _, _ = api
+    dataset_id = dataset(client)
+    first_trainer = script(
+        client,
+        b'''class Model:
+    def predict(self, X): return [1.0] * len(X)
+def train(X_train, y_train, X_test, y_test, config): return Model()
+''',
+        "first",
+    )
+    first_created = client.post(
+        "/api/training-jobs",
+        json={"model_type": "electric_load", "dataset_id": dataset_id, "train_script_id": first_trainer},
+    )
+    first_job = wait(client, first_created.json()["id"])
+    assert first_job["status"] == "SUCCEEDED", first_job
+    assert client.post(f"/api/models/{first_job['model_version_id']}/publish", json={"confirm": True}).status_code == 200
+
+    second_trainer = script(
+        client,
+        b'''class Model:
+    def predict(self, X): return [0.0] * len(X)
+def train(X_train, y_train, X_test, y_test, config): return Model()
+''',
+        "second",
+    )
+    second_created = client.post(
+        "/api/training-jobs",
+        json={"model_type": "electric_load", "dataset_id": dataset_id, "train_script_id": second_trainer},
+    )
+    second_job = wait(client, second_created.json()["id"])
+    assert second_job["status"] == "SUCCEEDED", second_job
+    evaluation = client.get(f"/api/training-jobs/{second_job['id']}/evaluation").json()
+    assert evaluation["model_comparison"]["baseline"]["model_version_id"] == first_job["model_version_id"]
+    assert evaluation["baseline_predictions"] == [1.0, 1.0]
+    assert evaluation["model_metrics"]["baseline"]["mae"] == pytest.approx(5.0)
+    assert len(evaluation["baseline_errors"]) == second_job["test_row_count"] == 2
 
 
 def test_retry_and_missing_task_errors(api):

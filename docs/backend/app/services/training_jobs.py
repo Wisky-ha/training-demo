@@ -44,6 +44,7 @@ from ..domain.enums import (
 from ..schemas.training_jobs import TrainingJobCreate
 from ..storage import ArtifactNotFoundError, ArtifactType, FileStorageService
 from .model_baseline import ModelBaselineService
+from .model_evaluation import ModelEvaluationError, ModelEvaluationService
 from .preprocessing import PreprocessingError, PreprocessingService
 from .training_executor import TrainingScriptExecutor
 
@@ -416,34 +417,11 @@ class TrainingJobService:
 
     @classmethod
     def _metrics(cls, actual: np.ndarray, predicted: np.ndarray) -> dict[str, Any]:
-        error = actual - predicted
-        absolute = np.abs(error)
-        nonzero = actual != 0
-        valid_count = int(nonzero.sum())
-        if valid_count:
-            mape = float(np.mean(np.abs(error[nonzero] / actual[nonzero])) * 100.0)
-            note = f"MAPE 已排除 {len(actual) - valid_count} 个实际值为 0 的样本"
-        else:
-            mape = None
-            note = "MAPE 没有有效样本：所有实际值均为 0"
-        centered = actual - float(np.mean(actual))
-        denominator = float(np.sum(centered * centered))
-        if denominator:
-            r2 = float(1.0 - np.sum(error * error) / denominator)
-        else:
-            # R² has no variance denominator for a constant/one-row test set.
-            # Keep the four-metric contract numeric without inventing a fit.
-            r2 = 1.0 if not np.any(error) else 0.0
-        return {
-            "mae": float(np.mean(absolute)),
-            "rmse": float(np.sqrt(np.mean(error * error))),
-            "mape": mape,
-            "r2": r2,
-            "sample_count": int(len(actual)),
-            "mape_valid_count": valid_count,
-            "mape_excluded_count": int(len(actual) - valid_count),
-            "mape_note": note,
-        }
+        """Compatibility wrapper for callers of the former inline evaluator."""
+        try:
+            return ModelEvaluationService.metrics(actual, predicted)
+        except ModelEvaluationError as exc:
+            raise TrainingJobError(str(exc), exc.code) from exc
 
     @staticmethod
     def _json(value: Any) -> Any:
@@ -472,30 +450,41 @@ class TrainingJobService:
             })
         return rows, len(indexes) != total, total
 
-    def _production_comparison(self, model_type: ModelType, X_test: pd.DataFrame, actual: np.ndarray) -> dict[str, Any] | None:
-        record = self.session.scalar(select(ModelTypeORM).where(ModelTypeORM.code == model_type))
-        current = record.current_version if record else None
-        if current is None or not current.is_current:
-            return None
+    def _baseline_prediction(
+        self,
+        job: TrainingJobORM,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        X_test: pd.DataFrame,
+    ) -> tuple[ModelVersionORM, np.ndarray, str]:
+        """Load the selected baseline and predict on the candidate's X_test.
+
+        The system v0-baseline is metadata-only in this release.  Its stable
+        fallback is the training-set mean, while user production versions use
+        their persisted artifact.  Both paths receive the exact same X_test.
+        """
+        selected_id = (job.config_summary or {}).get("baseline", {}).get("model_version_id")
+        baseline = self.session.get(ModelVersionORM, selected_id) if selected_id else None
+        if baseline is None:
+            baseline = self.baseline_service.get_retraining_baseline(job.model_type)
+        if baseline.model_type is not job.model_type:
+            raise TrainingJobError("基线模型与任务模型类型不匹配", "BASELINE_MODEL_TYPE_MISMATCH")
         try:
-            raw = self.storage.read_model(current.id)
+            raw = self.storage.read_model(baseline.id)
             model = joblib.load(BytesIO(raw))
-            predicted = self._prediction(model, X_test, len(actual))
-            return {"model_version_id": current.id, "version": current.version, "metrics": self._metrics(actual, predicted), "source": "artifact"}
-        except Exception:
-            # A manually seeded production row may predate artifact storage.
-            # Its persisted metrics are still useful for a comparison table,
-            # but are explicitly marked as stored rather than recomputed here.
-            stored = dict(current.metrics or {})
-            stored = dict(stored.get("metrics", stored))
-            required = ("mae", "rmse", "mape", "r2")
-            if all(key in stored for key in required):
-                stored.setdefault("sample_count", 0)
-                stored.setdefault("mape_valid_count", 0)
-                stored.setdefault("mape_excluded_count", 0)
-                stored.setdefault("mape_note", "生产模型使用已保存的评估指标")
-                return {"model_version_id": current.id, "version": current.version, "metrics": stored, "source": "stored"}
-            return None
+            return baseline, self._prediction(model, X_test, len(X_test)), "artifact"
+        except ArtifactNotFoundError as exc:
+            if not baseline.is_baseline:
+                raise TrainingJobError(f"基线模型制品不存在：{exc}", "BASELINE_ARTIFACT_NOT_FOUND") from exc
+            # v0-baseline has no model file yet.  Do not fabricate a comparison
+            # from stale persisted metrics: calculate all baseline metrics on
+            # this same test set using the deterministic mean predictor.
+            values = y_train.to_numpy(dtype=float)
+            if values.size == 0 or not np.isfinite(values).all():
+                raise TrainingJobError("基线模型训练数据无效", "BASELINE_DATA_INVALID")
+            return baseline, np.full(len(X_test), float(np.mean(values))), "training_mean_fallback"
+        except Exception as exc:
+            raise TrainingJobError(f"基线模型预测失败：{exc}", "BASELINE_PREDICTION_FAILED") from exc
 
     @staticmethod
     def _next_version(session: Session, model_type: ModelType) -> str:
@@ -513,59 +502,59 @@ class TrainingJobService:
         ordered_times: pd.Series, result: Any, predictions: np.ndarray,
     ) -> tuple[ModelVersionORM, dict[str, Any], str]:
         actual = y_test.to_numpy(dtype=float)
-        metrics = self._metrics(actual, predictions)
-        chart_data, sampled, total = self._chart(ordered_times.iloc[len(y_train):].reset_index(drop=True), actual, predictions)
-        error_data = [
-            {"time": row["time"], "timestamp": row["timestamp"], "error": row["error"], "absolute_error": row["absolute_error"], "percentage_error": row["percentage_error"]}
-            for row in chart_data
-        ]
-        production = self._production_comparison(job.model_type, X_test, actual)
-        candidate = {"model_version_id": None, "metrics": metrics}
-        comparison = {
-            "candidate": candidate,
-            "new_model": candidate,
-            "production": production,
-            "current_model": production,
-            "changes": None,
-        }
-        if production:
-            comparison["changes"] = {
-                key: (metrics[key] - production["metrics"][key])
-                if metrics[key] is not None and production["metrics"].get(key) is not None else None
-                for key in ("mae", "rmse", "mape", "r2")
-            }
-        evaluation = {
-            **metrics,
-            "chart_data": chart_data,
-            "error_data": error_data,
-            "chart_sampled": sampled,
-            "chart_total_count": total,
-            "chart_sample_count": len(chart_data),
-            "model_comparison": comparison,
-        }
-        model_bytes = getattr(result, "model_bytes", None)
-        if not model_bytes:
+        test_times = ordered_times.iloc[len(y_train):].reset_index(drop=True)
+        baseline, baseline_predictions, baseline_source = self._baseline_prediction(
+            job, X_train, y_train, X_test
+        )
+        try:
+            evaluation = ModelEvaluationService.evaluate(
+                times=[self._json(item) for item in test_times],
+                actual=actual,
+                candidate_predictions=predictions,
+                baseline_predictions=baseline_predictions,
+                candidate_id=None,
+                baseline_id=baseline.id,
+                baseline_version=baseline.version,
+                candidate_version=self._next_version(self.session, job.model_type),
+            )
+        except ModelEvaluationError as exc:
+            raise TrainingJobError(str(exc), exc.code) from exc
+        chart_data, sampled, total = self._chart(test_times, actual, predictions)
+        evaluation["chart_data"] = chart_data
+        evaluation["chart_sampled"] = sampled
+        evaluation["chart_total_count"] = total
+        evaluation["chart_sample_count"] = len(chart_data)
+        comparison = evaluation["model_comparison"]
+        comparison["baseline"]["source"] = baseline_source
+        comparison["production"] = comparison["baseline"]
+        comparison["current_model"] = comparison["baseline"]
+        model_bytes = None
+        serialization_error: Exception | None = None
+        # Prefer cloudpickle so source-defined model classes remain loadable
+        # after the executor removes its temporary module from sys.modules.
+        try:
+            import cloudpickle
+            model_bytes = cloudpickle.dumps(result.model)
+        except Exception as exc:
+            serialization_error = exc
+        if model_bytes is None:
             try:
                 buffer = BytesIO()
                 joblib.dump(result.model, buffer)
                 model_bytes = buffer.getvalue()
             except Exception as exc:
-                try:
-                    import cloudpickle
-                    model_bytes = cloudpickle.dumps(result.model)
-                except Exception:
-                    raise TrainingJobError(f"模型制品保存失败：{exc}", "MODEL_SERIALIZATION_FAILED") from exc
+                cause = serialization_error or exc
+                raise TrainingJobError(f"模型制品保存失败：{cause}", "MODEL_SERIALIZATION_FAILED") from exc
         version_id = str(uuid4())
         # Allocate the candidate ID before inserting JSON metrics so the
         # comparison payload is complete in the initial row.
         comparison["candidate"]["model_version_id"] = version_id
-        evaluation["model_comparison"] = comparison
         artifact = self.storage.save_model(version_id, model_bytes)
         try:
             version = self.version_repository.create(
             id=version_id,
             model_type=job.model_type,
-            version=self._next_version(self.session, job.model_type),
+            version=evaluation["model_comparison"]["candidate"].get("version") or self._next_version(self.session, job.model_type),
             model_path=artifact.relative_path,
             training_job_id=job.id,
             train_script_id=train_script.id,
@@ -728,6 +717,17 @@ class TrainingJobService:
                 "predicted_values": [row.get("predicted") for row in chart_data],
             },
             "error_data": version.metrics.get("error_data", []),
+            "test_time_series": version.metrics.get("test_time_series", []),
+            "timestamps": version.metrics.get("timestamps", version.metrics.get("test_time_series", [])),
+            "actual_values": version.metrics.get("actual_values", []),
+            "candidate_predictions": version.metrics.get("candidate_predictions", []),
+            "baseline_predictions": version.metrics.get("baseline_predictions", []),
+            "candidate_errors": version.metrics.get("candidate_errors", []),
+            "baseline_errors": version.metrics.get("baseline_errors", []),
+            "error_series": version.metrics.get("error_series", version.metrics.get("candidate_errors", [])),
+            "model_metrics": version.metrics.get("metrics", {}),
+            "metric_differences": version.metrics.get("metric_differences", {}),
+            "metrics_difference": version.metrics.get("metrics_difference", version.metrics.get("metric_differences", {})),
             "chart_sampled": version.metrics.get("chart_sampled", False),
             "chart_total_count": version.metrics.get("chart_total_count", metrics["sample_count"]),
             "chart_sample_count": version.metrics.get("chart_sample_count", len(version.metrics.get("chart_data", []))),

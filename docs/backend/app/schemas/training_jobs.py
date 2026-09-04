@@ -87,7 +87,19 @@ class EvaluationResponse(BaseModel):
     model_version_id: str
     metrics: MetricSet
     chart_data: list[dict[str, Any]]
+    # These persisted series are never chart-sampled and cover every test row.
+    test_time_series: list[Any] = Field(default_factory=list)
+    timestamps: list[Any] = Field(default_factory=list)
+    actual_values: list[float] = Field(default_factory=list)
+    candidate_predictions: list[float] = Field(default_factory=list)
+    baseline_predictions: list[float] = Field(default_factory=list)
+    candidate_errors: list[float] = Field(default_factory=list)
+    baseline_errors: list[float] = Field(default_factory=list)
+    error_series: list[float] = Field(default_factory=list)
     error_data: list[dict[str, Any]]
+    model_metrics: dict[str, Any] = Field(default_factory=dict)
+    metric_differences: dict[str, float | None] = Field(default_factory=dict)
+    metrics_difference: dict[str, float | None] = Field(default_factory=dict)
     chart_sampled: bool
     chart_total_count: int
     chart_sample_count: int

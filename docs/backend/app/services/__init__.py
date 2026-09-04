@@ -16,6 +16,10 @@ from .model_baseline import (
     ModelBaselineError,
     ModelBaselineService,
 )
+from .model_evaluation import (
+    ModelEvaluationError,
+    ModelEvaluationService,
+)
 from .model_lifecycle import (
     ModelLifecycleError,
     ModelLifecycleService,
@@ -53,6 +57,8 @@ __all__ = [
     "BASELINE_VERSION",
     "ModelBaselineError",
     "ModelBaselineService",
+    "ModelEvaluationError",
+    "ModelEvaluationService",
     "DatasetSplitError",
     "DatasetSplitNotFoundError",
     "DatasetSplitService",
