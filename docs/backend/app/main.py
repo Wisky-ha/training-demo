@@ -12,19 +12,32 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import Settings, get_settings
-from .db.session import initialize_database
+from .db.session import (
+    create_database_engine,
+    create_session_factory,
+    get_session,
+    initialize_database,
+)
+from .datasets.router import router as dataset_router
+from .scripts.router import router as script_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create the API application with explicit settings when needed in tests."""
 
     active_settings = settings or get_settings()
+    # Keep the engine and session factory on the app instance so a test or a
+    # deployment with explicit settings never accidentally writes to the
+    # process-wide default database.
+    engine = create_database_engine(active_settings)
+    session_factory = create_session_factory(engine)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         active_settings.ensure_storage_directories()
-        initialize_database(settings=active_settings)
+        initialize_database(engine=engine)
         yield
+        engine.dispose()
 
     application = FastAPI(
         title=active_settings.app_name,
@@ -39,6 +52,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    application.state.settings = active_settings
+    application.state.session_factory = session_factory
+
+    def app_session():
+        session = session_factory()
+        try:
+            yield session
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    # Routes depend on the standard database dependency, while this override
+    # makes create_app(Settings(...)) isolated and keeps existing test/deployment
+    # overrides working as expected.
+    application.dependency_overrides[get_session] = app_session
+    application.include_router(dataset_router)
+    application.include_router(script_router)
 
     @application.get("/health", tags=["system"])
     @application.get("/api/health", include_in_schema=False)

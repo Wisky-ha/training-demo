@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel as PydanticModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..domain.enums import (
@@ -173,6 +173,67 @@ class ModelTypeRepository(Repository[ModelTypeORM]):
 
 class ScriptRepository(Repository[ScriptORM]):
     model = ScriptORM
+
+    def _library_statement(
+        self,
+        *,
+        model_type: ModelType | None = None,
+        script_type: ScriptType | None = None,
+        status: ScriptStatus | None = None,
+    ):
+        statement = select(ScriptORM)
+        if model_type is not None:
+            statement = statement.join(ScriptORM.supported_model_types).where(
+                ModelTypeORM.code == model_type
+            )
+        if script_type is not None:
+            statement = statement.where(ScriptORM.script_type == script_type)
+        if status is not None:
+            statement = statement.where(ScriptORM.status == status)
+        return statement.order_by(ScriptORM.created_at.desc(), ScriptORM.id.desc())
+
+    def list_library(
+        self,
+        *,
+        model_type: ModelType | None = None,
+        script_type: ScriptType | None = None,
+        status: ScriptStatus | None = None,
+    ) -> list[ScriptORM]:
+        """List scripts with optional compatibility and library filters."""
+
+        return list(self.session.scalars(self._library_statement(
+            model_type=model_type, script_type=script_type, status=status
+        )).unique().all())
+
+    def count_library(
+        self,
+        *,
+        model_type: ModelType | None = None,
+        script_type: ScriptType | None = None,
+        status: ScriptStatus | None = None,
+    ) -> int:
+        """Count scripts matching the same filters as :meth:`list_library`."""
+
+        statement = select(func.count(ScriptORM.id))
+        if model_type is not None:
+            statement = statement.join(ScriptORM.supported_model_types).where(
+                ModelTypeORM.code == model_type
+            )
+        if script_type is not None:
+            statement = statement.where(ScriptORM.script_type == script_type)
+        if status is not None:
+            statement = statement.where(ScriptORM.status == status)
+        return int(self.session.scalar(statement) or 0)
+
+    def version_exists(self, name: str, script_type: ScriptType, version: str) -> bool:
+        """Check the immutable version key before writing an upload."""
+
+        statement = select(ScriptORM.id).where(
+            ScriptORM.name == name,
+            ScriptORM.script_type == script_type,
+            ScriptORM.version == version,
+        )
+        return self.session.scalar(statement) is not None
 
 
 class DatasetRepository(Repository[DatasetORM]):

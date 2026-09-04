@@ -5,12 +5,31 @@ from __future__ import annotations
 from collections.abc import Generator
 from functools import lru_cache
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from ..core.config import Settings, get_settings
 from .models import Base
+
+
+def _configure_sqlite_foreign_keys(engine: Engine) -> None:
+    """Enable SQLite foreign-key enforcement for every pooled connection."""
+
+    if engine.dialect.name != "sqlite":
+        return
+    if not getattr(engine, "_foreign_keys_configured", False):
+        @event.listens_for(engine, "connect")
+        def _set_foreign_keys(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        setattr(engine, "_foreign_keys_configured", True)
+    # An engine supplied by a caller may already have an open pooled
+    # connection, so set the pragma on the currently checked-out connection.
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
 
 
 def create_database_engine(settings: Settings | None = None) -> Engine:
@@ -29,20 +48,27 @@ def create_database_engine(settings: Settings | None = None) -> Engine:
         engine_kwargs["connect_args"] = {"check_same_thread": False}
         if url == "sqlite:///:memory:":
             engine_kwargs["poolclass"] = StaticPool
-    return create_engine(url, **engine_kwargs)
+    engine = create_engine(url, **engine_kwargs)
+    _configure_sqlite_foreign_keys(engine)
+    return engine
 
 
 @lru_cache(maxsize=1)
-def get_engine() -> Engine:
-    """Return the process-wide application engine."""
-
+def _get_default_engine() -> Engine:
     return create_database_engine(get_settings())
+
+
+def get_engine(settings: Settings | None = None) -> Engine:
+    """Return the process-wide engine, or an engine for explicit settings."""
+
+    return _get_default_engine() if settings is None else create_database_engine(settings)
 
 
 def create_session_factory(engine: Engine | None = None) -> sessionmaker[Session]:
     """Build a session factory, useful for application and test databases."""
 
-    return sessionmaker(bind=engine or get_engine(), autoflush=False, expire_on_commit=False)
+    active_engine = engine if engine is not None else get_engine()
+    return sessionmaker(bind=active_engine, autoflush=False, expire_on_commit=False)
 
 
 SessionLocal = create_session_factory()
@@ -76,7 +102,8 @@ def initialize_database(
     baseline records belong to later workflow initialization.
     """
 
-    active_engine = engine or create_database_engine(settings)
+    active_engine = engine if engine is not None else create_database_engine(settings)
+    _configure_sqlite_foreign_keys(active_engine)
     Base.metadata.create_all(active_engine)
     return active_engine
 
@@ -84,6 +111,7 @@ def initialize_database(
 # Conventional aliases make the infrastructure easy to discover.
 init_db = initialize_database
 get_db_session = get_session
+get_db = get_session
 
 
 __all__ = [
@@ -93,6 +121,7 @@ __all__ = [
     "get_engine",
     "get_session",
     "get_db_session",
+    "get_db",
     "initialize_database",
     "init_db",
 ]

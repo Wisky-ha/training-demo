@@ -112,13 +112,16 @@ def test_unique_model_version_and_repository_crud(session: Session):
     assert repo.delete(model_type.id) is True
     assert repo.get(model_type.id) is None
 
+    ModelTypeRepository(session).create(
+        code=ModelType.INTEGRATED_ENERGY, name="综合能耗"
+    )
     first = ModelVersionORM(
-        model_type=ModelType.ELECTRIC_LOAD,
+        model_type=ModelType.INTEGRATED_ENERGY,
         version="v1",
         model_path="v1.joblib",
     )
     second = ModelVersionORM(
-        model_type=ModelType.ELECTRIC_LOAD,
+        model_type=ModelType.INTEGRATED_ENERGY,
         version="v1",
         model_path="v2.joblib",
     )

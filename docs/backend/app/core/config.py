@@ -47,6 +47,38 @@ class Settings(BaseSettings):
         default=Path("data/uploads"),
         validation_alias=AliasChoices("APP_UPLOAD_STORAGE_DIR", "APP_APP_UPLOAD_STORAGE_DIR"),
     )
+    # Scripts may use their own root; otherwise they share the artifact root
+    # selected by ``storage_root`` (or the backwards-compatible model root).
+    script_storage_dir: Path | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "APP_SCRIPT_STORAGE_DIR",
+            "APP_APP_SCRIPT_STORAGE_DIR",
+            "script_dir",
+        ),
+    )
+    # A dedicated root can be configured for all persisted artifacts.  When it
+    # is omitted, the existing model directory remains the compatible default.
+    storage_root: Path | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "APP_STORAGE_ROOT",
+            "APP_FILE_STORAGE_ROOT",
+            "APP_APP_STORAGE_ROOT",
+            "APP_APP_FILE_STORAGE_ROOT",
+            "file_storage_root",
+            "file_storage_dir",
+            "artifact_storage_dir",
+        ),
+    )
+    max_script_size_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        gt=0,
+        validation_alias=AliasChoices(
+            "APP_MAX_SCRIPT_SIZE_BYTES",
+            "APP_APP_MAX_SCRIPT_SIZE_BYTES",
+        ),
+    )
     allowed_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173"],
         validation_alias=AliasChoices("APP_ALLOWED_ORIGINS", "APP_APP_ALLOWED_ORIGINS"),
@@ -85,11 +117,29 @@ class Settings(BaseSettings):
             raise ValueError("database_url must include a SQLite database path")
         return Path(raw_path).expanduser()
 
+    @property
+    def file_storage_root(self) -> Path:
+        """Return the root used by the artifact file storage service.
+
+        ``model_storage_dir`` was part of the original configuration, so it is
+        deliberately retained as the fallback for backwards compatibility.
+        """
+
+        return self.storage_root or self.model_storage_dir
+
+    @property
+    def script_file_storage_root(self) -> Path:
+        """Return the root used for uploaded Python script source files."""
+
+        return self.script_storage_dir or self.file_storage_root
+
     def ensure_storage_directories(self) -> None:
         """Create configured application storage directories when needed."""
 
         self.model_storage_dir.mkdir(parents=True, exist_ok=True)
         self.upload_storage_dir.mkdir(parents=True, exist_ok=True)
+        self.file_storage_root.mkdir(parents=True, exist_ok=True)
+        self.script_file_storage_root.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)

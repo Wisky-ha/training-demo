@@ -9,6 +9,7 @@ description = "FastAPI backend foundation for the model training visualization p
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115,<1.0",
+    "python-multipart>=0.0.9,<1.0",
     "pydantic-settings>=2.6,<3.0",
     "uvicorn[standard]>=0.32,<1.0",
     "pandas>=2.2,<3.0",
