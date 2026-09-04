@@ -199,8 +199,11 @@ export function WorkflowPage() {
       return
     }
     setGuardError(null)
-    setContext({ currentStep: requested })
-  }, [requested, canEnter, navigate, setContext, workflow.modelType, workflow.datasetId, workflow.preprocessTaskId, workflow.split, workflow.trainingJobId])
+    // Avoid writing the same persisted context on every render.  `canEnter`
+    // depends on the workflow object, so an unconditional update here causes
+    // a render/effect loop in React (and makes navigation unusable).
+    if (workflow.currentStep !== requested) setContext({ currentStep: requested })
+  }, [requested, canEnter, navigate, setContext, workflow.currentStep, workflow.modelType, workflow.datasetId, workflow.preprocessTaskId, workflow.split, workflow.trainingJobId])
   const go = (step: WorkflowStepId) => { if (canEnter(step)) navigate(`/workflow/${step}`); else setGuardError('该步骤尚未解锁，请按顺序完成前置步骤。') }
   const activeIndex = workflowSteps.findIndex((step) => step.id === requested)
   const content = requested === 'model-type' ? <ModelTypeStep select={(modelType) => { setContext({ modelType, datasetId: null, dataset: null, preprocessScriptId: null, preprocessTaskId: null, preprocessTask: null, split: null, trainScriptId: null, trainingJobId: null, trainingJob: null, evaluation: null, modelVersion: null, currentStep: 'model-type' }); navigate('/workflow/upload') }} /> : requested === 'upload' ? <UploadStep back={() => go('model-type')} setDataset={(dataset) => setContext({ dataset, datasetId: dataset.id, preprocessTaskId: null, preprocessTask: null, split: null, trainingJobId: null, trainingJob: null, evaluation: null, modelVersion: null })} /> : requested === 'preprocess' ? <PreprocessStep back={() => go('upload')} complete={(task, scriptId) => setContext({ preprocessTask: task, preprocessTaskId: task.id, preprocessScriptId: scriptId, split: null, trainingJobId: null, trainingJob: null, evaluation: null, modelVersion: null })} /> : requested === 'split' ? <SplitStep back={() => go('preprocess')} complete={(split) => setContext({ split })} /> : requested === 'train' ? <TrainingStep back={() => go('split')} complete={(trainingJob) => setContext({ trainingJob, trainingJobId: trainingJob.id, modelVersion: trainingJob.model_version_id ? { id: trainingJob.model_version_id, model_type: trainingJob.model_type, version: '候选版本', status: 'READY', is_baseline: false, is_current: false, is_abnormal: false, is_rollback_available: false, metrics: null, created_at: trainingJob.created_at, published_at: null } : workflow.modelVersion })} /> : requested === 'evaluate' ? <EvaluationStep back={() => go('train')} publish={() => go('publish')} /> : <PublishStep back={() => go('evaluate')} />
