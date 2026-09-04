@@ -283,11 +283,13 @@ export interface TrainingLogsResponse {
 export type MetricName = 'mae' | 'rmse' | 'mape' | 'r2'
 
 export interface EvaluationMetrics {
-  mae: number
-  rmse: number
+  mae: number | null
+  rmse: number | null
   mape: number | null
-  r2: number
+  r2: number | null
+  sample_count?: number
   mape_valid_count: number
+  mape_excluded_count?: number
   mape_note?: string | null
 }
 
@@ -299,19 +301,26 @@ export interface MetricComparison {
 }
 
 export interface EvaluationSeriesPoint {
-  timestamp: IsoDateTime
+  /** The service currently returns `time`; `timestamp` is retained for compatibility. */
+  timestamp?: IsoDateTime
+  time?: IsoDateTime
   actual: number
-  candidate_prediction: number
+  /** Newer clients may call this candidate_prediction; the service uses predicted. */
+  predicted?: number
+  candidate_prediction?: number
   baseline_prediction?: number | null
   error: number
+  signed_error?: number
+  absolute_error?: number
+  percentage_error?: number | null
 }
 
 export interface EvaluationChartData {
-  actual_vs_prediction: EvaluationSeriesPoint[]
-  error_series: EvaluationSeriesPoint[]
-  metric_comparison: MetricComparison[]
-  sampled: boolean
-  source_row_count: number
+  actual_vs_prediction?: EvaluationSeriesPoint[]
+  error_series?: EvaluationSeriesPoint[]
+  metric_comparison?: MetricComparison[]
+  sampled?: boolean
+  source_row_count?: number
 }
 
 export interface ModelEvaluation {

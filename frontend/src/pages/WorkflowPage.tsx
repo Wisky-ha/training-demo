@@ -3,7 +3,8 @@ import type { ReactNode } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError, apiClient } from '../api'
 import { useAppStore } from '../store/useAppStore'
-import { MODEL_TYPE_CODES, MODEL_TYPE_NAMES, type DatasetSplitResult, type DatasetUploadResult, type ModelEvaluation, type ModelTypeCode, type PreprocessTask, type ScriptContract, type TrainingJob } from '../types/contracts'
+import { EvaluationDashboard } from '../components/evaluation/EvaluationCharts'
+import { MODEL_TYPE_CODES, MODEL_TYPE_NAMES, type DatasetSplitResult, type DatasetUploadResult, type ModelTypeCode, type PreprocessTask, type ScriptContract, type TrainingJob } from '../types/contracts'
 import { workflowSteps, type WorkflowStepId } from '../types/workflow'
 
 const modelDescriptions: Record<ModelTypeCode, string> = {
@@ -146,21 +147,15 @@ function TrainingStep({ back, complete }: { back: () => void; complete: (job: Tr
     <StepActions back={back} next={job?.status === 'SUCCEEDED' ? () => navigate('/workflow/evaluate') : start} nextDisabled={loading || !selected || !datasetId || (job !== null && job.status !== 'FAILED')} nextLabel={loading ? '提交中…' : job?.status === 'SUCCEEDED' ? '查看评估结果' : job?.status === 'FAILED' ? '重新启动' : job ? '训练进行中…' : '启动训练'} />{job?.status === 'FAILED' && <div className="retry-row"><Button kind="secondary" disabled={loading} onClick={retry}>失败重试</Button></div>}</section>
 }
 
-function metricValue(evaluation: ModelEvaluation | null, key: 'mae' | 'rmse' | 'mape' | 'r2') {
-  const source = evaluation?.metrics ?? evaluation?.candidate
-  if (!source || typeof source !== 'object') return '—'
-  const value = (source as Record<string, unknown>)[key]
-  return typeof value === 'number' ? value.toFixed(4) : value == null ? '—' : String(value)
-}
-
 function EvaluationStep({ back, publish }: { back: () => void; publish: () => void }) {
   const job = useAppStore((state) => state.workflow.trainingJob)
   const evaluation = useAppStore((state) => state.workflow.evaluation)
   const loadEvaluation = useAppStore((state) => state.setWorkflowContext)
   const [loading, setLoading] = useState(!evaluation)
   const [error, setError] = useState<string | null>(null)
-  useEffect(() => { if (!job?.id || evaluation) return; apiClient.getTrainingJobEvaluation(job.id).then((result) => loadEvaluation({ evaluation: result })).catch((reason) => setError(errorMessage(reason))).finally(() => setLoading(false)) }, [job?.id, evaluation, loadEvaluation])
-  return <section className="workflow-panel"><div className="panel-heading"><div><p className="eyebrow">STEP 06 / EVALUATION</p><h2>评估结果摘要</h2><p>指标来自完整测试集；图表数据将在后续可视化步骤中深化。</p></div></div><ErrorBox message={error} />{loading && <div className="loading-line"><span className="spinner" />读取评估结果…</div>}{evaluation && <><div className="metric-grid">{(['mae', 'rmse', 'mape', 'r2'] as const).map((key) => <div className="metric-card" key={key}><small>{key.toUpperCase()}</small><strong>{metricValue(evaluation, key)}</strong></div>)}</div><InfoBox>测试集样本：{typeof evaluation.metrics === 'object' && evaluation.metrics && 'sample_count' in evaluation.metrics ? String(evaluation.metrics.sample_count) : '—'} · 评估已完成，可进入保存与发布。</InfoBox></>} {!loading && !evaluation && <div className="empty-state">暂无评估结果，请确认训练任务已成功完成。</div>}<StepActions back={back} next={publish} nextDisabled={!evaluation} nextLabel="保存与发布" /></section>
+  useEffect(() => { if (!job?.id || evaluation) return; let alive = true; apiClient.getTrainingJobEvaluation(job.id).then((result) => alive && loadEvaluation({ evaluation: result })).catch((reason) => alive && setError(errorMessage(reason))).finally(() => alive && setLoading(false)); return () => { alive = false } }, [job?.id, evaluation, loadEvaluation])
+  const retry = () => { setError(null); setLoading(true); loadEvaluation({ evaluation: null }) }
+  return <section className="workflow-panel"><div className="panel-heading"><div><p className="eyebrow">STEP 06 / EVALUATION</p><h2>评估结果与模型对比</h2><p>指标来自完整测试集；图表按测试集时间展示，数据量过大时仅抽样图表点位。</p></div></div><ErrorBox message={error} onRetry={retry} />{loading && <div className="loading-line"><span className="spinner" />读取评估结果…</div>}{evaluation && <><EvaluationDashboard evaluation={evaluation} /><InfoBox>评估已完成，可进入保存与发布。图表悬停可查看具体时间与数值。</InfoBox></>} {!loading && !evaluation && <div className="empty-state">暂无评估结果，请确认训练任务已成功完成。</div>}<StepActions back={back} next={publish} nextDisabled={!evaluation} nextLabel="保存与发布" /></section>
 }
 
 function PublishStep({ back }: { back: () => void }) {
