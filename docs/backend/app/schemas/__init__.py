@@ -1,5 +1,6 @@
 """API request and response schemas."""
 
+from .dataset_split import DatasetSplitRequest, DatasetSplitResponse, TimeRange
 from .preprocessing import (
     PreprocessingTaskCreate,
     PreprocessingTaskResponse,
@@ -18,6 +19,9 @@ __all__ = [
     "PaginatedScriptsResponse",
     "ScriptResponse",
     "ScriptUploadMetadata",
+    "DatasetSplitRequest",
+    "DatasetSplitResponse",
+    "TimeRange",
     "PreprocessingTaskCreate",
     "PreprocessingTaskResponse",
     "PreprocessingTransformRequest",

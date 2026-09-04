@@ -226,6 +226,64 @@ class DatasetORM(Base):
     preprocessing_tasks: Mapped[list[PreprocessingTaskORM]] = relationship(
         "PreprocessingTaskORM", back_populates="dataset"
     )
+    split: Mapped[DatasetSplitORM | None] = relationship(
+        "DatasetSplitORM", back_populates="dataset", uselist=False
+    )
+
+
+class DatasetSplitORM(Base):
+    """Immutable metadata for one fixed, time-ordered dataset split.
+
+    The source CSV is never rewritten and no train/test row copy is stored.
+    This record keeps the boundary and ranges needed by later training jobs.
+    """
+
+    __tablename__ = "dataset_splits"
+    __table_args__ = (
+        CheckConstraint(
+            "split_ratio = 0.8 AND test_ratio = 0.2",
+            name="ck_dataset_splits_fixed_ratios",
+        ),
+        CheckConstraint(
+            "train_row_count > 0 AND test_row_count > 0",
+            name="ck_dataset_splits_rows_nonempty",
+        ),
+        UniqueConstraint("dataset_id", name="uq_dataset_splits_dataset_id"),
+        Index("ix_dataset_splits_dataset_id", "dataset_id"),
+        Index("ix_dataset_splits_created_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    dataset_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("datasets.id", ondelete="RESTRICT"), nullable=False
+    )
+    preprocessing_task_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("preprocessing_tasks.id", ondelete="RESTRICT"), nullable=True
+    )
+    data_source: Mapped[str] = mapped_column(String(32), nullable=False, default="raw")
+    split_strategy: Mapped[SplitStrategy] = mapped_column(
+        _enum_column(SplitStrategy), nullable=False, default=SplitStrategy.TIME_ORDERED
+    )
+    split_ratio: Mapped[float] = mapped_column(nullable=False, default=0.8)
+    test_ratio: Mapped[float] = mapped_column(nullable=False, default=0.2)
+    total_row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    train_row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    test_row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    train_time_range: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    test_time_range: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    sort_order: Mapped[str] = mapped_column(String(32), nullable=False, default="ascending")
+    rounding_rule: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="floor(total_row_count * 0.8)"
+    )
+    sorted_before_split: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+
+    dataset: Mapped[DatasetORM] = relationship("DatasetORM", back_populates="split")
+    preprocessing_task: Mapped[PreprocessingTaskORM | None] = relationship(
+        "PreprocessingTaskORM", back_populates="dataset_splits"
+    )
 
 
 class PreprocessingTaskORM(Base):
@@ -284,6 +342,9 @@ class PreprocessingTaskORM(Base):
     dataset: Mapped[DatasetORM] = relationship("DatasetORM", back_populates="preprocessing_tasks")
     preprocess_script: Mapped[ScriptORM | None] = relationship(
         "ScriptORM", foreign_keys=[preprocess_script_id], back_populates="preprocessing_tasks"
+    )
+    dataset_splits: Mapped[list[DatasetSplitORM]] = relationship(
+        "DatasetSplitORM", foreign_keys="DatasetSplitORM.preprocessing_task_id", back_populates="preprocessing_task"
     )
 
 
@@ -642,6 +703,7 @@ class RollbackRecordORM(Base):
 ModelTypeModel = ModelTypeORM
 ScriptModel = ScriptORM
 DatasetModel = DatasetORM
+DatasetSplitModel = DatasetSplitORM
 FileArtifactModel = FileArtifactORM
 TrainingJobModel = TrainingJobORM
 PreprocessingTaskModel = PreprocessingTaskORM
@@ -658,6 +720,7 @@ __all__ = [
     "ModelTypeORM",
     "ScriptORM",
     "DatasetORM",
+    "DatasetSplitORM",
     "FileArtifactORM",
     "TrainingJobORM",
     "PreprocessingTaskORM",
@@ -670,6 +733,7 @@ __all__ = [
     "ModelTypeModel",
     "ScriptModel",
     "DatasetModel",
+    "DatasetSplitModel",
     "FileArtifactModel",
     "TrainingJobModel",
     "PreprocessingTaskModel",

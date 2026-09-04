@@ -48,4 +48,8 @@ pytest -q backend/tests
 - 预处理脚本必须定义 `Preprocessor.fit(df, config)` 和 `transform(df, config)`，且 transform 返回 DataFrame；平台校验脚本类型、启用状态、模型兼容性、导入、方法签名、字段和行数。
 - `mode=skip` 持久化 `preprocess_used=false`、`preprocess_status=unused`、`preprocess_message=未使用预处理`，不解析或执行脚本，结果声明 `data_source=raw` 并将 `next_step` 设为 `dataset_split`。选择脚本时拟合状态保存到本地 preprocessor artifact；`POST /api/preprocessing-tasks/{id}/transform` 只复用已保存状态，不重新 fit。
 
-本步骤不实现数据划分执行、训练、评估、发布或预测接口。
+## 固定数据集划分接口（步骤 7）
+
+- `POST /api/datasets/{dataset_id}/split` 按时间列升序排序后执行固定的 80%/20% 划分；请求体只能提供可选的 `preprocessing_task_id`，比例和策略不可覆盖。无请求体时使用原始 CSV；传入已完成的预处理任务时复用其已拟合状态（跳过预处理则按既有约定使用原始数据）。
+- 行数规则为 `train=floor(total_row_count * 0.8)`，余数归测试集；总行数至少 2，且训练集、测试集必须非空。时间缺失、无法解析、重复时间和数据集/预处理任务不匹配会返回 `detail.code` 结构化错误；无序时间会先排序。
+- `GET /api/datasets/{dataset_id}/split` 查询已持久化结果。结果保存在 `dataset_splits` 表，不改写上传 CSV，也不复制或返回数据行，包含数据集关联、数据源、策略/比例、两侧行数、时间范围、排序和取整规则。重复 POST 返回 409。后续训练接口尚未实现。

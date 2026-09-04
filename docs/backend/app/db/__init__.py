@@ -3,6 +3,7 @@
 from .models import (
     Base,
     DatasetORM,
+    DatasetSplitORM,
     FileArtifactORM,
     ModelAlertORM,
     ModelReleaseORM,
@@ -17,6 +18,7 @@ from .models import (
 )
 from .repositories import (
     DatasetRepository,
+    DatasetSplitRepository,
     FileArtifactRepository,
     ModelAlertRepository,
     ModelTypeRepository,
@@ -46,6 +48,7 @@ __all__ = [
     "ReleaseRecordORM",
     "ScriptORM",
     "DatasetORM",
+    "DatasetSplitORM",
     "FileArtifactORM",
     "TrainingJobORM",
     "PreprocessingTaskORM",
@@ -57,6 +60,7 @@ __all__ = [
     "ModelTypeRepository",
     "ScriptRepository",
     "DatasetRepository",
+    "DatasetSplitRepository",
     "FileArtifactRepository",
     "TrainingJobRepository",
     "PreprocessingTaskRepository",

@@ -10,6 +10,12 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from ..db.session import SessionLocal, get_session
+from ..schemas.dataset_split import DatasetSplitRequest, DatasetSplitResponse
+from ..services.dataset_split import (
+    DatasetSplitError,
+    DatasetSplitNotFoundError,
+    DatasetSplitService,
+)
 from .service import CSVParseError, DatasetService, UnsupportedDatasetFileError
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
@@ -89,4 +95,69 @@ async def upload_dataset(
         ) from exc
 
 
-__all__ = ["get_request_session", "router", "upload_dataset"]
+def _split_error(exc: DatasetSplitError) -> HTTPException:
+    if exc.code == "DATASET_SPLIT_ALREADY_EXISTS":
+        response_status = status.HTTP_409_CONFLICT
+    elif exc.code == "DATASET_NOT_FOUND" or isinstance(exc, DatasetSplitNotFoundError):
+        response_status = status.HTTP_404_NOT_FOUND
+    else:
+        response_status = status.HTTP_400_BAD_REQUEST
+    return HTTPException(
+        status_code=response_status,
+        detail={"code": exc.code, "message": str(exc), **exc.details},
+    )
+
+
+@router.post(
+    "/{dataset_id}/split",
+    status_code=status.HTTP_201_CREATED,
+    response_model=DatasetSplitResponse,
+)
+def split_dataset(
+    dataset_id: str,
+    request: Request,
+    body: DatasetSplitRequest | None = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Persist the fixed ascending-time 80/20 split metadata.
+
+    The request accepts only an optional completed preprocessing task ID.  The
+    split strategy and ratios are server constants and cannot be overridden.
+    """
+
+    service = DatasetSplitService(
+        session, settings=getattr(request.app.state, "settings", None)
+    )
+    try:
+        split = service.split(
+            dataset_id,
+            preprocessing_task_id=body.preprocessing_task_id if body else None,
+        )
+    except DatasetSplitError as exc:
+        raise _split_error(exc) from exc
+    return service.to_response(split).model_dump(mode="json")
+
+
+@router.get("/{dataset_id}/split", response_model=DatasetSplitResponse)
+def get_dataset_split(
+    dataset_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Return the persisted split without rereading or changing source rows."""
+
+    service = DatasetSplitService(
+        session, settings=getattr(request.app.state, "settings", None)
+    )
+    try:
+        split = service.get(dataset_id)
+    except DatasetSplitError as exc:
+        raise _split_error(exc) from exc
+    if split is None:
+        raise _split_error(
+            DatasetSplitNotFoundError("该数据集尚未完成划分", dataset_id=dataset_id)
+        )
+    return service.to_response(split).model_dump(mode="json")
+
+
+__all__ = ["get_request_session", "get_dataset_split", "router", "split_dataset", "upload_dataset"]

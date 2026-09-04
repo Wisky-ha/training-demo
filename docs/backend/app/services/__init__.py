@@ -6,6 +6,11 @@ from .datasets import (
     ParsedDataset,
     UnsupportedDatasetFileError,
 )
+from .dataset_split import (
+    DatasetSplitError,
+    DatasetSplitNotFoundError,
+    DatasetSplitService,
+)
 from .preprocessing import (
     PreprocessingError,
     PreprocessingNotFoundError,
@@ -32,4 +37,7 @@ __all__ = [
     "PreprocessingError",
     "PreprocessingNotFoundError",
     "PreprocessingService",
+    "DatasetSplitError",
+    "DatasetSplitNotFoundError",
+    "DatasetSplitService",
 ]

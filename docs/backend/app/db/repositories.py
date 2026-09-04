@@ -25,6 +25,7 @@ from ..domain.enums import (
 )
 from .models import (
     DatasetORM,
+    DatasetSplitORM,
     FileArtifactORM,
     ModelAlertORM,
     ModelTypeORM,
@@ -264,6 +265,13 @@ class DatasetRepository(Repository[DatasetORM]):
     model = DatasetORM
 
 
+class DatasetSplitRepository(Repository[DatasetSplitORM]):
+    model = DatasetSplitORM
+
+    def get_for_dataset(self, dataset_id: str) -> DatasetSplitORM | None:
+        return self.get_by(dataset_id=dataset_id)
+
+
 class TrainingJobRepository(Repository[TrainingJobORM]):
     model = TrainingJobORM
 
@@ -325,6 +333,7 @@ class RollbackRepository(Repository[RollbackRecordORM]):
 ModelTypesRepository = ModelTypeRepository
 ScriptsRepository = ScriptRepository
 DatasetsRepository = DatasetRepository
+DatasetSplitsRepository = DatasetSplitRepository
 TrainingJobsRepository = TrainingJobRepository
 PreprocessingTasksRepository = PreprocessingTaskRepository
 FileArtifactsRepository = FileArtifactRepository
@@ -338,6 +347,7 @@ __all__ = [
     "ModelTypeRepository",
     "ScriptRepository",
     "DatasetRepository",
+    "DatasetSplitRepository",
     "TrainingJobRepository",
     "PreprocessingTaskRepository",
     "FileArtifactRepository",
