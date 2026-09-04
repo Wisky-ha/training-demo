@@ -52,4 +52,9 @@ pytest -q backend/tests
 
 - `POST /api/datasets/{dataset_id}/split` 按时间列升序排序后执行固定的 80%/20% 划分；请求体只能提供可选的 `preprocessing_task_id`，比例和策略不可覆盖。无请求体时使用原始 CSV；传入已完成的预处理任务时复用其已拟合状态（跳过预处理则按既有约定使用原始数据）。
 - 行数规则为 `train=floor(total_row_count * 0.8)`，余数归测试集；总行数至少 2，且训练集、测试集必须非空。时间缺失、无法解析、重复时间和数据集/预处理任务不匹配会返回 `detail.code` 结构化错误；无序时间会先排序。
-- `GET /api/datasets/{dataset_id}/split` 查询已持久化结果。结果保存在 `dataset_splits` 表，不改写上传 CSV，也不复制或返回数据行，包含数据集关联、数据源、策略/比例、两侧行数、时间范围、排序和取整规则。重复 POST 返回 409。后续训练接口尚未实现。
+- `GET /api/datasets/{dataset_id}/split` 查询已持久化结果。结果保存在 `dataset_splits` 表，不改写上传 CSV，也不复制或返回数据行，包含数据集关联、数据源、策略/比例、两侧行数、时间范围、排序和取整规则。重复 POST 返回 409。
+## 训练任务与评估（步骤 8）
+
+- `POST /api/training-jobs` 要求数据集已解析、固定 80/20 划分已完成，且训练脚本/预处理脚本已启用并兼容模型类型；预处理选择还必须关联到已完成任务。返回配置摘要后由后台执行。
+- `GET /api/training-jobs/{id}` 和 `/logs` 轮询任务状态、当前阶段、时间和日志；阶段为 `准备数据`、`加载训练脚本`、`执行训练`、`保存模型`、`进入评估`，不伪造百分比。`POST /api/training-jobs/{id}/retry` 只允许失败任务重试。
+- 成功执行会保存模型制品和 `DRAFT` 版本，不改变当前生产模型。`GET /api/training-jobs/{id}/evaluation` 返回完整测试集的 MAE、RMSE、MAPE、R²、MAPE 有效/排除样本数、时间序列图表数据、误差数据和生产模型对比信息；图表超过 1000 点时均匀抽样，但指标不抽样。

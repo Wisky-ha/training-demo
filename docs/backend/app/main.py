@@ -5,6 +5,7 @@ Run locally from the repository root with:
     uvicorn backend.app.main:app --reload
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -21,6 +22,7 @@ from .db.session import (
 from .datasets.router import router as dataset_router
 from .preprocessing.router import router as preprocessing_router
 from .scripts.router import router as script_router
+from .training_jobs.router import router as training_job_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -33,12 +35,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     engine = create_database_engine(active_settings)
     session_factory = create_session_factory(engine)
 
+    training_job_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="training-job")
+
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         active_settings.ensure_storage_directories()
         initialize_database(engine=engine)
-        yield
-        engine.dispose()
+        try:
+            yield
+        finally:
+            training_job_executor.shutdown(wait=True, cancel_futures=True)
+            engine.dispose()
 
     application = FastAPI(
         title=active_settings.app_name,
@@ -55,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     application.state.settings = active_settings
     application.state.session_factory = session_factory
+    application.state.training_job_executor = training_job_executor
 
     def app_session():
         session = session_factory()
@@ -73,6 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(dataset_router)
     application.include_router(script_router)
     application.include_router(preprocessing_router)
+    application.include_router(training_job_router)
 
     @application.get("/health", tags=["system"])
     @application.get("/api/health", include_in_schema=False)

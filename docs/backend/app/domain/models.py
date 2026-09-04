@@ -109,6 +109,7 @@ class TrainingJob(DomainModel):
     model_type: ModelType
     dataset_id: str = Field(min_length=1)
     preprocess_script_id: str | None = None
+    preprocessing_task_id: str | None = None
     train_script_id: str = Field(min_length=1)
     split_strategy: SplitStrategy = SplitStrategy.TIME_ORDERED
     # ``split_ratio`` is the required 80% training portion from the spec.
@@ -116,8 +117,12 @@ class TrainingJob(DomainModel):
     test_ratio: float = Field(default=0.2, gt=0, lt=1)
     status: TrainingJobStatus = TrainingJobStatus.PENDING
     progress_stage: str | None = None
+    current_stage: str | None = None
     stage_started_at: datetime | None = None
     logs: list[str] = Field(default_factory=list)
+    config: dict[str, Any] = Field(default_factory=dict)
+    config_summary: dict[str, Any] = Field(default_factory=dict)
+    model_version_id: str | None = None
     error_message: str | None = None
     train_row_count: int | None = Field(default=None, ge=0)
     test_row_count: int | None = Field(default=None, ge=0)
@@ -125,6 +130,7 @@ class TrainingJob(DomainModel):
     train_time_end: datetime | None = None
     test_time_start: datetime | None = None
     test_time_end: datetime | None = None
+    started_at: datetime | None = None
     created_at: datetime = Field(default_factory=_utc_now)
     finished_at: datetime | None = None
 

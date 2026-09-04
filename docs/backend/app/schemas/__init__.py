@@ -7,6 +7,13 @@ from .preprocessing import (
     PreprocessingTransformRequest,
     PreprocessingTransformResponse,
 )
+from .training_jobs import (
+    EvaluationResponse,
+    MetricSet,
+    TrainingJobCreate,
+    TrainingJobLogsResponse,
+    TrainingJobResponse,
+)
 from .scripts import (
     PaginationMeta,
     PaginatedScriptsResponse,
@@ -26,4 +33,9 @@ __all__ = [
     "PreprocessingTaskResponse",
     "PreprocessingTransformRequest",
     "PreprocessingTransformResponse",
+    "EvaluationResponse",
+    "MetricSet",
+    "TrainingJobCreate",
+    "TrainingJobLogsResponse",
+    "TrainingJobResponse",
 ]

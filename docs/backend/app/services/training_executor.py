@@ -12,8 +12,10 @@ import ast
 import builtins
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from io import BytesIO
 import inspect
 import logging
+import joblib
 import sys
 import threading
 import time
@@ -176,6 +178,9 @@ class TrainingExecutionResult(Mapping[str, Any]):
     exception_type: str | None = None
     traceback: str | None = None
     duration_ms: float = 0.0
+    # Internal-only bytes for the training workflow.  They are intentionally
+    # not exposed by ``to_dict`` or an HTTP response.
+    model_bytes: bytes | None = None
 
     @property
     def status(self) -> str:
@@ -303,6 +308,7 @@ class TrainingScriptExecutor:
         config: dict[str, Any] | None = None,
         *,
         source_code: str | None = None,
+        persist_model: bool = False,
         script_id: str | None = None,
     ) -> TrainingExecutionResult:
         """Execute ``train(X_train, y_train, X_test, y_test, config)``.
@@ -319,6 +325,7 @@ class TrainingScriptExecutor:
         collector = _LogCollector()
         collector.add("训练脚本开始执行")
         model: Any | None = None
+        model_bytes: bytes | None = None
         error: str | None = None
         error_code: str | None = None
         exception_type: str | None = None
@@ -373,6 +380,23 @@ class TrainingScriptExecutor:
                                     "MODEL_PREDICT_INVALID",
                                 )
                             collector.add("训练脚本执行完成")
+                            if persist_model:
+                                try:
+                                    buffer = BytesIO()
+                                    # The generated module remains registered
+                                    # until this context exits, which makes
+                                    # source-defined model classes pickleable.
+                                    joblib.dump(model, buffer)
+                                    model_bytes = buffer.getvalue()
+                                except Exception as exc:
+                                    try:
+                                        import cloudpickle
+                                        model_bytes = cloudpickle.dumps(model)
+                                    except Exception:
+                                        raise TrainingScriptExecutionError(
+                                            f"模型制品序列化失败：{exc}",
+                                            "MODEL_SERIALIZATION_FAILED",
+                                        ) from exc
                     except Exception as exc:
                         error = self._error_message(exc)
                         error_code = getattr(exc, "code", "TRAIN_EXECUTION_FAILED")
@@ -396,6 +420,7 @@ class TrainingScriptExecutor:
             exception_type=exception_type,
             traceback=exception_trace,
             duration_ms=(time.perf_counter() - started) * 1000,
+            model_bytes=model_bytes,
         )
 
     # Names kept as small adapters for callers that use "run" or explicitly

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from functools import lru_cache
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -105,7 +105,32 @@ def initialize_database(
     active_engine = engine if engine is not None else create_database_engine(settings)
     _configure_sqlite_foreign_keys(active_engine)
     Base.metadata.create_all(active_engine)
+    _upgrade_training_job_columns(active_engine)
     return active_engine
+
+
+def _upgrade_training_job_columns(engine: Engine) -> None:
+    """Add nullable workflow columns when opening a pre-step-8 SQLite DB.
+
+    The project has no migration runner yet.  These additions are deliberately
+    nullable/defaulted so existing datasets and production-version records are
+    never rewritten or invalidated by the training workflow.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    columns = {item["name"] for item in inspect(engine).get_columns("training_jobs")}
+    additions = {
+        "preprocessing_task_id": "VARCHAR(36)",
+        "started_at": "DATETIME",
+        "current_stage": "VARCHAR(100)",
+        "config": "JSON NOT NULL DEFAULT '{}'",
+        "config_summary": "JSON NOT NULL DEFAULT '{}'",
+        "model_version_id": "VARCHAR(36)",
+    }
+    with engine.begin() as connection:
+        for name, definition in additions.items():
+            if name not in columns:
+                connection.execute(text(f"ALTER TABLE training_jobs ADD COLUMN {name} {definition}"))
 
 
 # Conventional aliases make the infrastructure easy to discover.

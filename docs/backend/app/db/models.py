@@ -418,6 +418,7 @@ class TrainingJobORM(Base):
         Index("ix_training_jobs_dataset_id", "dataset_id"),
         Index("ix_training_jobs_train_script_id", "train_script_id"),
         Index("ix_training_jobs_preprocess_script_id", "preprocess_script_id"),
+        Index("ix_training_jobs_preprocessing_task_id", "preprocessing_task_id"),
         Index("ix_training_jobs_created_at", "created_at"),
     )
 
@@ -431,6 +432,9 @@ class TrainingJobORM(Base):
     preprocess_script_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("scripts.id"), nullable=True
     )
+    preprocessing_task_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("preprocessing_tasks.id", ondelete="RESTRICT"), nullable=True
+    )
     train_script_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("scripts.id"), nullable=False
     )
@@ -443,8 +447,14 @@ class TrainingJobORM(Base):
         _enum_column(TrainingJobStatus), nullable=False, default=TrainingJobStatus.PENDING
     )
     progress_stage: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    current_stage: Mapped[str | None] = mapped_column(String(100), nullable=True)
     stage_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     logs: Mapped[list[str]] = mapped_column(MutableList.as_mutable(JSON), nullable=False, default=list)
+    config: Mapped[dict[str, Any]] = mapped_column(MutableDict.as_mutable(JSON), nullable=False, default=dict)
+    config_summary: Mapped[dict[str, Any]] = mapped_column(MutableDict.as_mutable(JSON), nullable=False, default=dict)
+    model_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("model_versions.id", ondelete="SET NULL"), nullable=True
+    )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     train_row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     test_row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -452,6 +462,7 @@ class TrainingJobORM(Base):
     train_time_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     test_time_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     test_time_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -462,11 +473,17 @@ class TrainingJobORM(Base):
     preprocess_script: Mapped[ScriptORM | None] = relationship(
         "ScriptORM", foreign_keys=[preprocess_script_id], back_populates="preprocess_training_jobs"
     )
+    preprocessing_task: Mapped[PreprocessingTaskORM | None] = relationship(
+        "PreprocessingTaskORM", foreign_keys=[preprocessing_task_id]
+    )
     train_script: Mapped[ScriptORM] = relationship(
         "ScriptORM", foreign_keys=[train_script_id], back_populates="training_jobs"
     )
     model_versions: Mapped[list[ModelVersionORM]] = relationship(
-        "ModelVersionORM", back_populates="training_job"
+        "ModelVersionORM", back_populates="training_job", foreign_keys="ModelVersionORM.training_job_id"
+    )
+    model_version: Mapped[ModelVersionORM | None] = relationship(
+        "ModelVersionORM", foreign_keys=[model_version_id], viewonly=True
     )
 
 
@@ -539,7 +556,9 @@ class ModelVersionORM(Base):
     model_type_record: Mapped[ModelTypeORM] = relationship(
         "ModelTypeORM", foreign_keys=[model_type], back_populates="model_versions"
     )
-    training_job: Mapped[TrainingJobORM | None] = relationship("TrainingJobORM", back_populates="model_versions")
+    training_job: Mapped[TrainingJobORM | None] = relationship(
+        "TrainingJobORM", back_populates="model_versions", foreign_keys=[training_job_id]
+    )
     train_script: Mapped[ScriptORM | None] = relationship(
         "ScriptORM", foreign_keys=[train_script_id], back_populates="model_versions_as_train_script"
     )
