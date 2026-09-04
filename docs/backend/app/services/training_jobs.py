@@ -598,7 +598,7 @@ class TrainingJobService:
         return version, evaluation, artifact.relative_path
 
     def run(self, job_id: str, config: dict[str, Any] | None = None) -> None:
-        """Execute in a worker-owned session and persist only a draft version."""
+        """Execute in a worker-owned session and persist a READY candidate."""
 
         job = self.repository.get(job_id)
         if job is None or job.status is TrainingJobStatus.CANCELLED:
@@ -660,6 +660,10 @@ class TrainingJobService:
             job.model_version_id = version.id
             self._stage(job, "进入评估", "RUNNING：进入评估")
             self._check_cancel(job)
+            # A candidate is transiently DRAFT while its artifact and
+            # evaluation are being assembled.  Only a fully successful
+            # training run exposes it to the lifecycle publisher as READY.
+            version.status = ModelVersionStatus.READY
             # Evaluation was calculated from every test row before this final
             # state transition.  No epoch/percentage progress is fabricated.
             job.status = TrainingJobStatus.SUCCEEDED
@@ -667,7 +671,7 @@ class TrainingJobService:
             job.current_stage = "进入评估"
             job.stage_started_at = self._now()
             job.finished_at = self._now()
-            job.logs = [*(job.logs or []), f"SUCCEEDED：评估完成，模型草稿已保存（{model_path}）"]
+            job.logs = [*(job.logs or []), f"SUCCEEDED：评估完成，模型已保存为 READY（{model_path}）"]
             self.session.commit()
         except _CancellationRequested:
             if artifact_id:

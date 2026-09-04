@@ -106,7 +106,33 @@ def initialize_database(
     _configure_sqlite_foreign_keys(active_engine)
     Base.metadata.create_all(active_engine)
     _upgrade_training_job_columns(active_engine)
+    _upgrade_model_alert_columns(active_engine)
+    _upgrade_publish_record_columns(active_engine)
     return active_engine
+
+
+def _upgrade_publish_record_columns(engine: Engine) -> None:
+    """Add idempotency support to release records in older SQLite databases."""
+    if engine.dialect.name != "sqlite":
+        return
+    columns = {item["name"] for item in inspect(engine).get_columns("publish_records")}
+    with engine.begin() as connection:
+        if "idempotency_key" not in columns:
+            connection.execute(text("ALTER TABLE publish_records ADD COLUMN idempotency_key VARCHAR(255)"))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_publish_records_idempotency_key "
+            "ON publish_records (idempotency_key) WHERE idempotency_key IS NOT NULL"
+        ))
+
+
+def _upgrade_model_alert_columns(engine: Engine) -> None:
+    """Upgrade the alert acknowledgement field in pre-lifecycle SQLite DBs."""
+    if engine.dialect.name != "sqlite":
+        return
+    columns = {item["name"] for item in inspect(engine).get_columns("model_alerts")}
+    if "acknowledged_at" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE model_alerts ADD COLUMN acknowledged_at DATETIME"))
 
 
 def _upgrade_training_job_columns(engine: Engine) -> None:

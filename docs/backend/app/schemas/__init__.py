@@ -20,6 +20,16 @@ from .scripts import (
     ScriptResponse,
     ScriptUploadMetadata,
 )
+from .models import (
+    AbnormalRequest,
+    LifecycleOperationResponse,
+    ModelAlertResponse,
+    ModelSaveRequest,
+    ModelVersionResponse,
+    PublishRequest,
+    RollbackRequest,
+    RollbackResponse,
+)
 
 __all__ = [
     "PaginationMeta",
@@ -33,6 +43,14 @@ __all__ = [
     "PreprocessingTaskResponse",
     "PreprocessingTransformRequest",
     "PreprocessingTransformResponse",
+    "AbnormalRequest",
+    "LifecycleOperationResponse",
+    "ModelAlertResponse",
+    "ModelSaveRequest",
+    "ModelVersionResponse",
+    "PublishRequest",
+    "RollbackRequest",
+    "RollbackResponse",
     "EvaluationResponse",
     "MetricSet",
     "TrainingJobCreate",

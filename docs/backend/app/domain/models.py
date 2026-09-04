@@ -197,6 +197,8 @@ class ModelAlert(DomainModel):
     rollback_to: str | None = None
     status: AlertStatus = AlertStatus.ACTIVE
     created_at: datetime = Field(default_factory=_utc_now)
+    # Acknowledgement does not resolve the alert; publication does.
+    acknowledged_at: datetime | None = None
     resolved_at: datetime | None = None
 
 

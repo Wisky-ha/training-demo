@@ -23,6 +23,7 @@ from .datasets.router import router as dataset_router
 from .preprocessing.router import router as preprocessing_router
 from .scripts.router import router as script_router
 from .training_jobs.router import router as training_job_router
+from .model_router import alerts_router, router as model_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -82,6 +83,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(script_router)
     application.include_router(preprocessing_router)
     application.include_router(training_job_router)
+    application.include_router(model_router)
+    application.include_router(alerts_router)
 
     @application.get("/health", tags=["system"])
     @application.get("/api/health", include_in_schema=False)

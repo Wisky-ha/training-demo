@@ -605,6 +605,12 @@ class PublishRecordORM(Base):
     __table_args__ = (
         Index("ix_publish_records_model_version_id", "model_version_id"),
         Index("ix_publish_records_published_at", "published_at"),
+        Index(
+            "uq_publish_records_idempotency_key",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
@@ -621,6 +627,7 @@ class PublishRecordORM(Base):
         DateTime(timezone=True), default=_utc_now, nullable=False
     )
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     model_version: Mapped[ModelVersionORM] = relationship(
         "ModelVersionORM",
@@ -663,6 +670,9 @@ class ModelAlertORM(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Acknowledgement is separate from status: an acknowledged anomaly stays
+    # visible and active until a successful replacement is published.
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     model_type_record: Mapped[ModelTypeORM] = relationship(
         "ModelTypeORM", foreign_keys=[model_type], back_populates="alerts"
