@@ -106,6 +106,7 @@ def initialize_database(
     _configure_sqlite_foreign_keys(active_engine)
     Base.metadata.create_all(active_engine)
     _upgrade_training_job_columns(active_engine)
+    _upgrade_model_version_columns(active_engine)
     _upgrade_model_alert_columns(active_engine)
     _upgrade_publish_record_columns(active_engine)
     return active_engine
@@ -123,6 +124,19 @@ def _upgrade_publish_record_columns(engine: Engine) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_publish_records_idempotency_key "
             "ON publish_records (idempotency_key) WHERE idempotency_key IS NOT NULL"
         ))
+
+
+def _upgrade_model_version_columns(engine: Engine) -> None:
+    """Add model-version fields introduced by the lifecycle workflow."""
+    if engine.dialect.name != "sqlite":
+        return
+    columns = {item["name"] for item in inspect(engine).get_columns("model_versions")}
+    if "health_status" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE model_versions ADD COLUMN health_status "
+                "VARCHAR(8) NOT NULL DEFAULT 'HEALTHY'"
+            ))
 
 
 def _upgrade_model_alert_columns(engine: Engine) -> None:

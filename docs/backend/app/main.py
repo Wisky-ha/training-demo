@@ -27,6 +27,7 @@ from .preprocessing.router import router as preprocessing_router
 from .scripts.router import router as script_router
 from .training_jobs.router import router as training_job_router
 from .model_router import alerts_router, router as model_router
+from .services.model_baseline import ModelBaselineService
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -45,6 +46,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(application: FastAPI):
         active_settings.ensure_storage_directories()
         initialize_database(engine=engine)
+        with session_factory() as session:
+            ModelBaselineService(session).initialize_baselines()
         try:
             yield
         finally:

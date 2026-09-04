@@ -43,6 +43,7 @@ from ..domain.enums import (
 )
 from ..schemas.training_jobs import TrainingJobCreate
 from ..storage import ArtifactNotFoundError, ArtifactType, FileStorageService
+from .model_baseline import ModelBaselineService
 from .preprocessing import PreprocessingError, PreprocessingService
 from .training_executor import TrainingScriptExecutor
 
@@ -77,6 +78,7 @@ class TrainingJobService:
         self.settings = settings or get_settings()
         self.repository = TrainingJobRepository(session)
         self.version_repository = ModelVersionRepository(session)
+        self.baseline_service = ModelBaselineService(session)
         self.storage = FileStorageService(self.settings.file_storage_root, session=session)
 
     @classmethod
@@ -180,6 +182,7 @@ class TrainingJobService:
             request.train_script_id, request.model_type, ScriptType.TRAINER, "训练"
         )
         task = self._validate_preprocessing(request, dataset, split)
+        baseline = self.baseline_service.get_retraining_baseline(request.model_type)
         summary = {
             "model_type": {"code": request.model_type.value},
             "dataset": {
@@ -211,6 +214,12 @@ class TrainingJobService:
                 "name": train_script.name,
                 "version": train_script.version,
                 "status": train_script.status.value,
+            },
+            "baseline": {
+                "model_version_id": baseline.id,
+                "version": baseline.version,
+                "is_baseline": baseline.is_baseline,
+                "source": "system_baseline" if baseline.is_baseline else "current_production",
             },
         }
         job = self.repository.create(

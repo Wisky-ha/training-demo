@@ -11,6 +11,11 @@ from .dataset_split import (
     DatasetSplitNotFoundError,
     DatasetSplitService,
 )
+from .model_baseline import (
+    BASELINE_VERSION,
+    ModelBaselineError,
+    ModelBaselineService,
+)
 from .model_lifecycle import (
     ModelLifecycleError,
     ModelLifecycleService,
@@ -45,6 +50,9 @@ __all__ = [
     "PreprocessingError",
     "PreprocessingNotFoundError",
     "PreprocessingService",
+    "BASELINE_VERSION",
+    "ModelBaselineError",
+    "ModelBaselineService",
     "DatasetSplitError",
     "DatasetSplitNotFoundError",
     "DatasetSplitService",

@@ -23,6 +23,7 @@ from ..db.models import (
 from ..domain.enums import AlertStatus, HealthStatus, ModelType, ModelVersionStatus, RollbackStatus
 from ..schemas.models import AbnormalRequest, ModelSaveRequest
 from ..storage import ArtifactType, FileStorageService
+from .model_baseline import ModelBaselineService
 
 
 class ModelLifecycleError(ValueError):
@@ -59,6 +60,7 @@ class ModelLifecycleService:
         self.session = session
         self.settings = settings or get_settings()
         self.storage = FileStorageService(self.settings.file_storage_root, session=session)
+        self.baselines = ModelBaselineService(session)
 
     @classmethod
     def _lock_for(cls, model_type: ModelType) -> RLock:
@@ -71,6 +73,21 @@ class ModelLifecycleService:
 
     def get(self, version_id: str) -> ModelVersionORM | None:
         return self.session.get(ModelVersionORM, version_id)
+
+    def initialize_baselines(self) -> list[ModelVersionORM]:
+        """Provision system baselines through the dedicated service."""
+
+        return self.baselines.initialize_baselines()
+
+    def get_baseline(self, model_type: ModelType | str) -> ModelVersionORM:
+        """Delegate baseline lookup to the dedicated baseline boundary."""
+
+        return self.baselines.get_baseline(model_type)
+
+    def get_retraining_baseline(self, model_type: ModelType | str) -> ModelVersionORM:
+        """Select current production or the system baseline for retraining."""
+
+        return self.baselines.get_retraining_baseline(model_type)
 
     def list(self, *, model_type: ModelType | None = None,
              status: ModelVersionStatus | None = None,
@@ -238,6 +255,8 @@ class ModelLifecycleService:
         version = self.get(version_id)
         if version is None:
             raise ModelNotFoundError()
+        if version.is_baseline:
+            raise ModelLifecycleError("系统基线不能作为用户模型发布", "MODEL_BASELINE_IMMUTABLE")
         with self._lock_for(version.model_type):
             record = self._lock_type(version.model_type)
             if idempotency_key:
@@ -290,6 +309,8 @@ class ModelLifecycleService:
         version = self.get(version_id)
         if version is None:
             raise ModelNotFoundError()
+        if version.is_baseline:
+            raise ModelLifecycleError("系统基线不能下线", "MODEL_BASELINE_IMMUTABLE")
         with self._lock_for(version.model_type):
             record = self._lock_type(version.model_type)
             if version.health_status is HealthStatus.ABNORMAL or version.status is ModelVersionStatus.ABNORMAL:
@@ -368,6 +389,8 @@ class ModelLifecycleService:
             raise ModelNotFoundError()
         if not reason.strip():
             raise ModelLifecycleError("异常原因不能为空", "ABNORMAL_REASON_REQUIRED")
+        if version.is_baseline:
+            raise ModelLifecycleError("系统基线不能标记为异常", "MODEL_BASELINE_IMMUTABLE")
         with self._lock_for(version.model_type):
             record = self._lock_type(version.model_type)
             current = self._current(record, include_unhealthy=True)

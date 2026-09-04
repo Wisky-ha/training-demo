@@ -316,6 +316,46 @@ class FileArtifactRepository(Repository[FileArtifactORM]):
 class ModelVersionRepository(Repository[ModelVersionORM]):
     model = ModelVersionORM
 
+    def get_baseline(self, model_type: ModelType) -> ModelVersionORM | None:
+        """Return the system-owned baseline for one model family."""
+
+        return self.session.scalar(select(ModelVersionORM).where(
+            ModelVersionORM.model_type == model_type,
+            ModelVersionORM.version == "v0-baseline",
+            ModelVersionORM.is_baseline.is_(True),
+        ))
+
+    def get_current_production(self, model_type: ModelType) -> ModelVersionORM | None:
+        """Return the healthy published version behind the type pointer.
+
+        The pointer is authoritative.  The ``is_current`` lookup is retained
+        as a compatibility fallback for databases created before the pointer
+        column was introduced.
+        """
+
+        model_type_record = self.session.scalar(select(ModelTypeORM).where(
+            ModelTypeORM.code == model_type
+        ))
+        current = (
+            self.session.get(ModelVersionORM, model_type_record.current_version_id)
+            if model_type_record and model_type_record.current_version_id
+            else None
+        )
+        if current is None:
+            current = self.session.scalar(select(ModelVersionORM).where(
+                ModelVersionORM.model_type == model_type,
+                ModelVersionORM.is_current.is_(True),
+            ))
+        if current is None or current.model_type != model_type or current.is_baseline:
+            return None
+        if (
+            not current.is_current
+            or current.status is not ModelVersionStatus.PUBLISHED
+            or current.health_status is not HealthStatus.HEALTHY
+        ):
+            return None
+        return current
+
 
 class PublishRecordRepository(Repository[PublishRecordORM]):
     model = PublishRecordORM

@@ -48,7 +48,7 @@ def _error(exc: ModelLifecycleError) -> HTTPException:
         "MODEL_VERSION_ALREADY_EXISTS", "MODEL_LIFECYCLE_CONFLICT", "IDEMPOTENCY_KEY_CONFLICT",
         "PUBLISH_STATE_INVALID", "OFFLINE_STATE_INVALID", "ROLLBACK_STATE_INVALID",
         "ROLLBACK_TARGET_INVALID", "ROLLBACK_TARGET_NOT_FOUND", "MODEL_HEALTH_INVALID",
-        "ABNORMAL_STATE_INVALID", "NO_HEALTHY_ROLLBACK_VERSION",
+        "ABNORMAL_STATE_INVALID", "NO_HEALTHY_ROLLBACK_VERSION", "MODEL_BASELINE_IMMUTABLE",
     }:
         response_status = status.HTTP_409_CONFLICT
     else:
@@ -114,6 +114,8 @@ def save_existing_model(model_id: str, body: ModelSaveRequest, request: Request,
         raise _error(ModelNotFoundError())
     if existing.model_type is not body.model_type:
         raise _error(ModelLifecycleError("模型类型不匹配", "MODEL_TYPE_INVALID"))
+    if existing.is_baseline:
+        raise _error(ModelLifecycleError("系统基线不能修改", "MODEL_BASELINE_IMMUTABLE"))
     if existing.status not in {ModelVersionStatus.DRAFT, ModelVersionStatus.READY}:
         raise _error(ModelLifecycleError("当前状态不能再次保存", "MODEL_SAVE_STATE_INVALID"))
     try:
