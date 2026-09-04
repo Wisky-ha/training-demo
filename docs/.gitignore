@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local configuration and runtime data
+.env
+backend/.env
+data/
+backend/data/
+*.db
+
+# Local model and upload artifacts
+models/
+uploads/
