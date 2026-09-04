@@ -11,6 +11,7 @@ from backend.app.db.models import ModelTypeORM, ScriptORM
 from backend.app.db.session import create_session_factory, initialize_database, get_session
 from backend.app.domain.enums import ModelType, ScriptStatus, ScriptType
 from backend.app.main import create_app
+from backend.app.storage.local import FileStorageService
 
 
 @pytest.fixture
@@ -143,6 +144,33 @@ def test_upload_rejects_bad_file_or_metadata(api_context, kwargs, status_code):
     client, _, _ = api_context
     response = _upload(client, **kwargs)
     assert response.status_code == status_code
+
+
+def test_upload_requires_all_metadata_fields(api_context):
+    client, _, _ = api_context
+    response = client.post(
+        "/api/scripts/upload",
+        data={"name": "trainer", "script_type": "trainer", "supported_model_types": "[]"},
+        files={"file": ("train.py", b"pass", "text/x-python")},
+    )
+    assert response.status_code == 422
+
+
+def test_storage_failure_rolls_back_database_and_file(api_context, monkeypatch):
+    client, factory, storage_root = api_context
+    original_save = FileStorageService.save_script_source
+
+    def save_then_fail(storage, script_id, source):
+        original_save(storage, script_id, source)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(FileStorageService, "save_script_source", save_then_fail)
+    response = _upload(client)
+
+    assert response.status_code == 500
+    with factory() as session:
+        assert session.query(ScriptORM).count() == 0
+    assert not list((storage_root / "script").glob("*.py"))
 
 
 def test_duplicate_script_version_is_rejected_without_extra_file(api_context):
