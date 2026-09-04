@@ -1,4 +1,13 @@
-import type { EntityId, ModelTypeCode } from './contracts'
+import type {
+  DatasetSplitResult,
+  DatasetUploadResult,
+  EntityId,
+  ModelEvaluation,
+  ModelTypeCode,
+  ModelVersionSummary,
+  PreprocessTask,
+  TrainingJob,
+} from './contracts'
 
 export const workflowSteps = [
   { id: 'model-type', label: '选择模型类型', caption: 'Model type' },
@@ -15,7 +24,15 @@ export type WorkflowStepId = (typeof workflowSteps)[number]['id']
 export interface WorkflowDraft {
   modelType: ModelTypeCode | null
   datasetId: EntityId | null
+  dataset: DatasetUploadResult | null
   preprocessScriptId: EntityId | null
+  preprocessTaskId: EntityId | null
+  preprocessTask: PreprocessTask | null
+  split: DatasetSplitResult | null
   trainScriptId: EntityId | null
+  trainingJobId: EntityId | null
+  trainingJob: TrainingJob | null
+  evaluation: ModelEvaluation | null
+  modelVersion: ModelVersionSummary | null
   currentStep: WorkflowStepId
 }

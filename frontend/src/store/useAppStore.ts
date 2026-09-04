@@ -19,8 +19,16 @@ interface AppState {
 const initialWorkflow: WorkflowDraft = {
   modelType: null,
   datasetId: null,
+  dataset: null,
   preprocessScriptId: null,
+  preprocessTaskId: null,
+  preprocessTask: null,
+  split: null,
   trainScriptId: null,
+  trainingJobId: null,
+  trainingJob: null,
+  evaluation: null,
+  modelVersion: null,
   currentStep: 'model-type',
 }
 

@@ -53,7 +53,7 @@ export interface ModelTypeContract {
 }
 
 export type ScriptType = 'preprocessor' | 'trainer'
-export type ScriptStatus = 'enabled' | 'disabled'
+export type ScriptStatus = 'enabled' | 'disabled' | 'ENABLED' | 'DISABLED'
 
 export interface ScriptContract {
   id: EntityId
@@ -155,15 +155,30 @@ export interface StageProgress<TStage extends string = string> {
 export interface PreprocessTask {
   id: EntityId
   dataset_id: EntityId
+  model_type?: ModelTypeCode
   script_id: EntityId | null
-  status: WorkflowStageStatus
-  current_stage: PreprocessStage
-  stages: StageProgress<PreprocessStage>[]
+  preprocess_script_id?: EntityId | null
+  preprocess_used?: boolean
+  preprocess_status?: 'used' | 'unused'
+  status: WorkflowStageStatus | 'waiting' | 'running' | 'succeeded' | 'skipped' | 'failed'
+  current_stage?: PreprocessStage
+  stage?: PreprocessStage
+  progress_stage?: PreprocessStage
+  stages?: StageProgress<PreprocessStage>[]
   summary?: PreprocessResultSummary | null
-  logs: TrainingLogEntry[]
+  input_row_count?: number | null
+  output_row_count?: number | null
+  input_columns?: string[]
+  output_columns?: string[]
+  input_summary?: Record<string, JsonValue>
+  output_summary?: Record<string, JsonValue>
+  logs: Array<TrainingLogEntry | string>
   error_message?: string | null
   created_at: IsoDateTime
+  started_at?: IsoDateTime | null
   finished_at?: IsoDateTime | null
+  next_step?: 'dataset_split' | null
+  data_source?: 'raw' | 'preprocessed'
 }
 
 export type TrainingJobStatus =
@@ -180,13 +195,36 @@ export type TrainingJobStatus =
 export type TrainingJobStage = PreprocessStage | TrainingStage | 'splitting' | 'evaluating'
 
 export interface DatasetSplitSummary {
-  strategy: 'time_ordered'
-  train_ratio: 0.8
+  strategy?: 'time_ordered'
+  split_strategy?: 'time_ordered'
+  train_ratio?: 0.8
+  split_ratio?: 0.8
   test_ratio: 0.2
+  total_row_count?: number
   train_row_count: number
   test_row_count: number
-  train_time_range: [IsoDateTime, IsoDateTime] | null
-  test_time_range: [IsoDateTime, IsoDateTime] | null
+  train_time_range: [IsoDateTime, IsoDateTime] | null | { start: IsoDateTime; end: IsoDateTime }
+  test_time_range: [IsoDateTime, IsoDateTime] | null | { start: IsoDateTime; end: IsoDateTime }
+}
+
+export interface DatasetSplitResult {
+  id: EntityId
+  dataset_id: EntityId
+  preprocessing_task_id: EntityId | null
+  data_source: 'raw' | 'preprocessed'
+  split_strategy: 'time_ordered'
+  split_ratio: 0.8
+  test_ratio: 0.2
+  total_row_count: number
+  train_row_count: number
+  test_row_count: number
+  train_time_range: { start: IsoDateTime; end: IsoDateTime }
+  test_time_range: { start: IsoDateTime; end: IsoDateTime }
+  train_time_start: IsoDateTime
+  train_time_end: IsoDateTime
+  test_time_start: IsoDateTime
+  test_time_end: IsoDateTime
+  created_at: IsoDateTime
 }
 
 export interface TrainingLogEntry {
@@ -200,7 +238,9 @@ export interface CreateTrainingJobRequest {
   model_type: ModelTypeCode
   dataset_id: EntityId
   preprocess_script_id: EntityId | null
+  preprocessing_task_id?: EntityId | null
   train_script_id: EntityId
+  config?: Record<string, JsonValue>
 }
 
 export interface TrainingJob {
@@ -208,15 +248,26 @@ export interface TrainingJob {
   model_type: ModelTypeCode
   dataset_id: EntityId
   preprocess_script_id: EntityId | null
+  preprocessing_task_id?: EntityId | null
   train_script_id: EntityId
+  split_strategy?: 'time_ordered'
   split_ratio: 0.8
+  test_ratio?: 0.2
   status: TrainingJobStatus
-  progress_stage: TrainingJobStage
+  progress_stage?: TrainingJobStage | string | null
+  current_stage?: TrainingJobStage | string | null
+  stage?: string | null
   progress?: StageProgress<TrainingJobStage> | null
   stages?: StageProgress<TrainingJobStage>[]
-  logs: TrainingLogEntry[]
+  logs: Array<TrainingLogEntry | string>
   error_message: string | null
   dataset_split?: DatasetSplitSummary | null
+  train_row_count?: number | null
+  test_row_count?: number | null
+  train_time_start?: IsoDateTime | null
+  train_time_end?: IsoDateTime | null
+  test_time_start?: IsoDateTime | null
+  test_time_end?: IsoDateTime | null
   model_version_id?: EntityId | null
   created_at: IsoDateTime
   started_at?: IsoDateTime | null
@@ -225,7 +276,7 @@ export interface TrainingJob {
 
 export interface TrainingLogsResponse {
   job_id: EntityId
-  items: TrainingLogEntry[]
+  items: Array<TrainingLogEntry | string>
   next_cursor?: string | null
 }
 
@@ -266,10 +317,17 @@ export interface EvaluationChartData {
 export interface ModelEvaluation {
   id?: EntityId
   job_id?: EntityId
-  candidate: EvaluationMetrics
-  baseline: EvaluationMetrics
-  comparison: MetricComparison[]
-  chart_data: EvaluationChartData
+  model_version_id?: EntityId
+  candidate?: EvaluationMetrics
+  baseline?: EvaluationMetrics
+  metrics?: EvaluationMetrics | Record<string, JsonValue>
+  comparison?: MetricComparison[] | Record<string, JsonValue>
+  chart_data?: EvaluationChartData | Array<Record<string, JsonValue>>
+  error_data?: Array<Record<string, JsonValue>>
+  chart_sampled?: boolean
+  chart_total_count?: number
+  chart_sample_count?: number
+  model_comparison?: Record<string, JsonValue>
   created_at?: IsoDateTime
 }
 
@@ -307,11 +365,16 @@ export interface ModelVersionSummary {
   model_type: ModelTypeCode
   version: string
   status: ModelVersionStatus
+  health_status?: string
   is_baseline: boolean
   is_current: boolean
-  is_abnormal: boolean
-  is_rollback_available: boolean
-  metrics: EvaluationMetrics | null
+  is_abnormal?: boolean
+  is_rollback_available?: boolean
+  metrics: EvaluationMetrics | Record<string, JsonValue> | null
+  training_job_id?: EntityId | null
+  train_script_id?: EntityId | null
+  preprocess_script_id?: EntityId | null
+  previous_healthy_version_id?: EntityId | null
   train_script?: Pick<ScriptContract, 'id' | 'name' | 'version'> | null
   preprocess_script?: Pick<ScriptContract, 'id' | 'name' | 'version'> | null
   created_at: IsoDateTime
@@ -349,11 +412,28 @@ export interface PublishRecord {
 
 export interface PublishModelRequest {
   message?: string
+  confirm?: boolean
+  confirmed?: boolean
+}
+
+export interface ModelSaveRequest {
+  model_type: ModelTypeCode
+  status?: 'DRAFT' | 'READY'
+  training_job_id?: EntityId
+  train_script_id?: EntityId
+  preprocess_script_id?: EntityId | null
+  preprocess_used?: boolean
+  input_schema?: Record<string, JsonValue>
+  time_column?: string
+  feature_columns?: string[]
+  target_column?: string
+  metrics?: Record<string, JsonValue>
 }
 
 export interface PublishModelResponse {
-  model: ModelVersionDetail
-  record: PublishRecord
+  model: ModelVersionDetail | ModelVersionSummary
+  record?: PublishRecord
+  operation?: string
 }
 
 export interface RollbackRecord {

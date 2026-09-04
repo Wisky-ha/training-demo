@@ -10,7 +10,7 @@ function App() {
     <Routes>
       <Route element={<AppLayout />}>
         <Route index element={<HomePage />} />
-        <Route path="workflow" element={<WorkflowPage />} />
+        <Route path="workflow/:stepId?" element={<WorkflowPage />} />
         <Route
           path="models"
           element={

@@ -4,6 +4,7 @@ import type {
   ApiResponse,
   DatasetUploadOptions,
   DatasetUploadResult,
+  DatasetSplitResult,
   EntityId,
   HealthResponse,
   JsonValue,
@@ -15,6 +16,7 @@ import type {
   ModelAlert,
   ModelEvaluation,
   ModelTypeContract,
+  ModelTypeCode,
   ModelVersionDetail,
   ModelVersionSummary,
   PaginatedResponse,
@@ -22,6 +24,7 @@ import type {
   PredictionResponse,
   PublishModelRequest,
   PublishModelResponse,
+  ModelSaveRequest,
   RollbackModelRequest,
   RollbackResponse,
   ScriptContract,
@@ -29,6 +32,7 @@ import type {
   TrainingJob,
   TrainingLogsResponse,
   CreateTrainingJobRequest,
+  PreprocessTask,
 } from '../types/contracts'
 
 export const DEFAULT_API_BASE_URL = '/api'
@@ -114,8 +118,18 @@ function toErrorResponse(payload: unknown, status: number): ApiError {
     })
   }
 
-  if (isRecord(payload) && typeof payload.detail === 'string') {
-    return new ApiError(payload.detail, { status, code: 'VALIDATION_ERROR' })
+  if (isRecord(payload)) {
+    const detail = isRecord(payload.detail) ? payload.detail : null
+    const nestedError = isRecord(payload.error) ? payload.error : null
+    const message = (detail?.message ?? nestedError?.message ?? payload.detail)
+    const code = detail?.code ?? nestedError?.code
+    if (typeof message === 'string') {
+      return new ApiError(message, {
+        status,
+        code: typeof code === 'string' ? code : 'VALIDATION_ERROR',
+        details: asJsonValue(payload),
+      })
+    }
   }
 
   return new ApiError(status ? `API request failed with status ${status}` : 'Network request failed', {
@@ -223,6 +237,30 @@ export class ApiClient {
     return this.postForm<DatasetUploadResult>('datasets/upload', formData)
   }
 
+  createPreprocessingTask(input: {
+    model_type: ModelTypeCode
+    dataset_id: EntityId
+    preprocess_script_id?: EntityId | null
+    mode?: 'use' | 'skip'
+    skip?: boolean
+    config?: Record<string, JsonValue>
+  }): Promise<PreprocessTask> {
+    return this.postJson<PreprocessTask>('preprocessing-tasks', input)
+  }
+
+  getPreprocessingTask(id: EntityId): Promise<PreprocessTask> {
+    return this.get<PreprocessTask>(`preprocessing-tasks/${encodeURIComponent(id)}`)
+  }
+
+  splitDataset(datasetId: EntityId, preprocessingTaskId?: EntityId | null): Promise<DatasetSplitResult> {
+    return this.postJson<DatasetSplitResult>(`datasets/${encodeURIComponent(datasetId)}/split`,
+      preprocessingTaskId ? { preprocessing_task_id: preprocessingTaskId } : {})
+  }
+
+  getDatasetSplit(datasetId: EntityId): Promise<DatasetSplitResult> {
+    return this.get<DatasetSplitResult>(`datasets/${encodeURIComponent(datasetId)}/split`)
+  }
+
   listScripts(params?: ListScriptsParams): Promise<PaginatedResponse<ScriptContract>> {
     return this.get<PaginatedResponse<ScriptContract>>('scripts', {
       query: params as RequestOptions['query'],
@@ -255,6 +293,10 @@ export class ApiClient {
     return this.postJson<TrainingJob, CreateTrainingJobRequest>('training-jobs', input)
   }
 
+  retryTrainingJob(id: EntityId): Promise<TrainingJob> {
+    return this.postJson<TrainingJob>(`training-jobs/${encodeURIComponent(id)}/retry`)
+  }
+
   getTrainingJob(id: EntityId): Promise<TrainingJob> {
     return this.get<TrainingJob>(`training-jobs/${encodeURIComponent(id)}`)
   }
@@ -272,19 +314,29 @@ export class ApiClient {
     return this.get<ModelEvaluation>(`training-jobs/${encodeURIComponent(id)}/evaluation`)
   }
 
+  saveModel(id: EntityId, input: ModelSaveRequest): Promise<ModelVersionSummary> {
+    return this.postJson<ModelVersionSummary, ModelSaveRequest>(
+      `models/${encodeURIComponent(id)}/save`, input)
+  }
+
   publishModel(
     id: EntityId,
     input: PublishModelRequest = {},
   ): Promise<PublishModelResponse> {
     return this.postJson<PublishModelResponse, PublishModelRequest>(
       `models/${encodeURIComponent(id)}/publish`,
-      input,
+      { ...input, confirmed: input.confirmed ?? input.confirm ?? true },
     )
   }
 
-  listModels(params?: ListModelsParams): Promise<PaginatedResponse<ModelVersionSummary>> {
-    return this.get<PaginatedResponse<ModelVersionSummary>>('models', {
+  listModels(params?: ListModelsParams): Promise<ModelVersionSummary[]> {
+    return this.get<unknown>('models', {
       query: params as RequestOptions['query'],
+    }).then((payload) => {
+      const rows = Array.isArray(payload)
+        ? payload
+        : isRecord(payload) && Array.isArray(payload.items) ? payload.items : []
+      return rows as ModelVersionSummary[]
     })
   }
 
@@ -308,9 +360,14 @@ export class ApiClient {
     return this.postJson<MarkModelAbnormalResponse, MarkModelAbnormalRequest>('models/abnormal', input)
   }
 
-  listAlerts(params?: ListAlertsParams): Promise<PaginatedResponse<ModelAlert>> {
-    return this.get<PaginatedResponse<ModelAlert>>('alerts', {
+  listAlerts(params?: ListAlertsParams): Promise<ModelAlert[]> {
+    return this.get<unknown>('alerts', {
       query: params as RequestOptions['query'],
+    }).then((payload) => {
+      const rows = Array.isArray(payload)
+        ? payload
+        : isRecord(payload) && Array.isArray(payload.items) ? payload.items : []
+      return rows as ModelAlert[]
     })
   }
 
