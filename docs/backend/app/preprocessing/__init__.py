@@ -1,0 +1,1 @@
+"""Optional preprocessing workflow stage."""

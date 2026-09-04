@@ -41,4 +41,11 @@ pytest -q backend/tests
 - `POST /api/datasets/upload` 接收 multipart 字段 `file`，仅接受 `.csv`；成功返回并保存数据集 ID、文件名、完整表头、按位置推断的时间/特征/目标角色、行列数、最多 5 行样例、时间解析与范围、字段类型、数值列、缺失值统计、校验结果和文件存储校验信息。
 - 第一列必须全部可解析为时间，最后一列必须是有限数值；特征允许部分缺失，但不能整列为空。至少需要两行数据以保证后续 80%/20% 划分的训练集和测试集均非空。时间重复、目标缺失、编码/CSV 格式错误会返回结构化的 `errors`（同时保留可直接展示的 `detail`）。
 - 数据文件按 UUID 保存为 `<storage-root>/dataset/<dataset-id>.csv`，数据库保存 `DatasetORM` 检查元数据及 `FileArtifactORM` 的大小和 SHA-256；数据库失败时会清理已写入文件。`APP_MAX_DATASET_SIZE_BYTES` 默认 50 MiB，HTTP 层最多读取限制值加 1 字节，预览固定最多 5 行，避免大文件响应和内存无界增长。
-- 本步骤不实现预处理、数据划分执行、训练、评估、发布或预测接口。
+## 预处理接口（步骤 6）
+
+- `POST /api/preprocessing-tasks` 接收 `model_type`、`dataset_id`、可选 `preprocess_script_id`、可选 `config`；`mode=skip` 或空脚本 ID 表示跳过。接口创建并执行任务，返回可查询的任务记录。
+- `GET /api/preprocessing-tasks/{id}` 查询阶段、日志、开始/结束时间、处理前后行数/字段/摘要和失败原因；阶段只使用 `waiting`、`data_reading`、`preprocessing`、`validating`、`completed`、`failed`，不伪造百分比进度。
+- 预处理脚本必须定义 `Preprocessor.fit(df, config)` 和 `transform(df, config)`，且 transform 返回 DataFrame；平台校验脚本类型、启用状态、模型兼容性、导入、方法签名、字段和行数。
+- `mode=skip` 持久化 `preprocess_used=false`、`preprocess_status=unused`、`preprocess_message=未使用预处理`，不解析或执行脚本，结果声明 `data_source=raw` 并将 `next_step` 设为 `dataset_split`。选择脚本时拟合状态保存到本地 preprocessor artifact；`POST /api/preprocessing-tasks/{id}/transform` 只复用已保存状态，不重新 fit。
+
+本步骤不实现数据划分执行、训练、评估、发布或预测接口。

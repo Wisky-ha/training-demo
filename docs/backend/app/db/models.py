@@ -36,6 +36,8 @@ from ..domain.enums import (
     HealthStatus,
     ModelType,
     ModelVersionStatus,
+    PreprocessingStage,
+    PreprocessingTaskStatus,
     RollbackStatus,
     ScriptStatus,
     ScriptType,
@@ -126,6 +128,9 @@ class ModelTypeORM(Base):
     training_jobs: Mapped[list[TrainingJobORM]] = relationship(
         "TrainingJobORM", foreign_keys="TrainingJobORM.model_type", back_populates="model_type_record"
     )
+    preprocessing_tasks: Mapped[list[PreprocessingTaskORM]] = relationship(
+        "PreprocessingTaskORM", foreign_keys="PreprocessingTaskORM.model_type", back_populates="model_type_record"
+    )
     alerts: Mapped[list[ModelAlertORM]] = relationship(
         "ModelAlertORM", foreign_keys="ModelAlertORM.model_type", back_populates="model_type_record"
     )
@@ -159,6 +164,9 @@ class ScriptORM(Base):
     )
     preprocess_training_jobs: Mapped[list[TrainingJobORM]] = relationship(
         "TrainingJobORM", foreign_keys="TrainingJobORM.preprocess_script_id", back_populates="preprocess_script"
+    )
+    preprocessing_tasks: Mapped[list[PreprocessingTaskORM]] = relationship(
+        "PreprocessingTaskORM", foreign_keys="PreprocessingTaskORM.preprocess_script_id", back_populates="preprocess_script"
     )
     model_versions_as_train_script: Mapped[list[ModelVersionORM]] = relationship(
         "ModelVersionORM", foreign_keys="ModelVersionORM.train_script_id", back_populates="train_script"
@@ -214,6 +222,68 @@ class DatasetORM(Base):
 
     training_jobs: Mapped[list[TrainingJobORM]] = relationship(
         "TrainingJobORM", back_populates="dataset"
+    )
+    preprocessing_tasks: Mapped[list[PreprocessingTaskORM]] = relationship(
+        "PreprocessingTaskORM", back_populates="dataset"
+    )
+
+
+class PreprocessingTaskORM(Base):
+    """Persisted execution record for the optional preprocessing stage.
+
+    This is intentionally separate from ``TrainingJobORM``: preprocessing can
+    be inspected and retried before the later dataset-splitting/training steps
+    exist, while retaining the same dataset and script foreign-key contracts.
+    """
+
+    __tablename__ = "preprocessing_tasks"
+    __table_args__ = (
+        Index("ix_preprocessing_tasks_dataset_created_at", "dataset_id", "created_at"),
+        Index("ix_preprocessing_tasks_status", "status"),
+        Index("ix_preprocessing_tasks_script_id", "preprocess_script_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    model_type: Mapped[ModelType] = mapped_column(
+        _enum_column(ModelType), ForeignKey("model_types.code"), nullable=False
+    )
+    dataset_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("datasets.id", ondelete="RESTRICT"), nullable=False
+    )
+    preprocess_script_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("scripts.id", ondelete="RESTRICT"), nullable=True
+    )
+    preprocess_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[PreprocessingTaskStatus] = mapped_column(
+        _enum_column(PreprocessingTaskStatus), nullable=False,
+        default=PreprocessingTaskStatus.WAITING,
+    )
+    stage: Mapped[PreprocessingStage] = mapped_column(
+        _enum_column(PreprocessingStage), nullable=False,
+        default=PreprocessingStage.WAITING,
+    )
+    logs: Mapped[list[str]] = mapped_column(MutableList.as_mutable(JSON), nullable=False, default=list)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    config: Mapped[dict[str, Any]] = mapped_column(MutableDict.as_mutable(JSON), nullable=False, default=dict)
+    input_row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_columns: Mapped[list[str]] = mapped_column(MutableList.as_mutable(JSON), nullable=False, default=list)
+    output_columns: Mapped[list[str]] = mapped_column(MutableList.as_mutable(JSON), nullable=False, default=list)
+    input_summary: Mapped[dict[str, Any]] = mapped_column(MutableDict.as_mutable(JSON), nullable=False, default=dict)
+    output_summary: Mapped[dict[str, Any]] = mapped_column(MutableDict.as_mutable(JSON), nullable=False, default=dict)
+    preprocessor_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    preprocessor_state: Mapped[dict[str, Any] | None] = mapped_column(MutableDict.as_mutable(JSON), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stage_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    model_type_record: Mapped[ModelTypeORM] = relationship(
+        "ModelTypeORM", foreign_keys=[model_type], back_populates="preprocessing_tasks"
+    )
+    dataset: Mapped[DatasetORM] = relationship("DatasetORM", back_populates="preprocessing_tasks")
+    preprocess_script: Mapped[ScriptORM | None] = relationship(
+        "ScriptORM", foreign_keys=[preprocess_script_id], back_populates="preprocessing_tasks"
     )
 
 
@@ -574,6 +644,7 @@ ScriptModel = ScriptORM
 DatasetModel = DatasetORM
 FileArtifactModel = FileArtifactORM
 TrainingJobModel = TrainingJobORM
+PreprocessingTaskModel = PreprocessingTaskORM
 ModelVersionModel = ModelVersionORM
 PublishRecordModel = PublishRecordORM
 ModelReleaseORM = PublishRecordORM
@@ -589,6 +660,7 @@ __all__ = [
     "DatasetORM",
     "FileArtifactORM",
     "TrainingJobORM",
+    "PreprocessingTaskORM",
     "ModelVersionORM",
     "PublishRecordORM",
     "ModelReleaseORM",
@@ -600,6 +672,7 @@ __all__ = [
     "DatasetModel",
     "FileArtifactModel",
     "TrainingJobModel",
+    "PreprocessingTaskModel",
     "ModelVersionModel",
     "PublishRecordModel",
     "ModelAlertModel",

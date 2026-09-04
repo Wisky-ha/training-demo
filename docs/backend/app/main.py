@@ -19,6 +19,7 @@ from .db.session import (
     initialize_database,
 )
 from .datasets.router import router as dataset_router
+from .preprocessing.router import router as preprocessing_router
 from .scripts.router import router as script_router
 
 
@@ -71,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.dependency_overrides[get_session] = app_session
     application.include_router(dataset_router)
     application.include_router(script_router)
+    application.include_router(preprocessing_router)
 
     @application.get("/health", tags=["system"])
     @application.get("/api/health", include_in_schema=False)

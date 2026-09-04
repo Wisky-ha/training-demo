@@ -60,6 +60,27 @@ class TrainingJobStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class PreprocessingTaskStatus(str, Enum):
+    """Outcome of the independently observable preprocessing step."""
+
+    WAITING = "WAITING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    SKIPPED = "SKIPPED"
+    FAILED = "FAILED"
+
+
+class PreprocessingStage(str, Enum):
+    """Stages exposed by the preprocessing progress contract."""
+
+    WAITING = "waiting"
+    DATA_READING = "data_reading"
+    PREPROCESSING = "preprocessing"
+    VALIDATING = "validating"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class ModelVersionStatus(str, Enum):
     """Lifecycle status of a saved model version."""
 

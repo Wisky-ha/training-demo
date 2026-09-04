@@ -16,6 +16,7 @@ from ..domain.enums import (
     HealthStatus,
     ModelType,
     ModelVersionStatus,
+    PreprocessingTaskStatus,
     RollbackStatus,
     ScriptStatus,
     ScriptType,
@@ -28,6 +29,7 @@ from .models import (
     ModelAlertORM,
     ModelTypeORM,
     ModelVersionORM,
+    PreprocessingTaskORM,
     PublishRecordORM,
     RollbackRecordORM,
     ScriptORM,
@@ -82,6 +84,7 @@ class Repository(Generic[ORMModel]):
                 ModelTypeORM: AlertStatus,
                 ScriptORM: ScriptStatus,
                 TrainingJobORM: TrainingJobStatus,
+                PreprocessingTaskORM: PreprocessingTaskStatus,
                 ModelVersionORM: ModelVersionStatus,
                 ModelAlertORM: AlertStatus,
                 RollbackRecordORM: RollbackStatus,
@@ -265,6 +268,10 @@ class TrainingJobRepository(Repository[TrainingJobORM]):
     model = TrainingJobORM
 
 
+class PreprocessingTaskRepository(Repository[PreprocessingTaskORM]):
+    model = PreprocessingTaskORM
+
+
 class FileArtifactRepository(Repository[FileArtifactORM]):
     model = FileArtifactORM
 
@@ -319,6 +326,7 @@ ModelTypesRepository = ModelTypeRepository
 ScriptsRepository = ScriptRepository
 DatasetsRepository = DatasetRepository
 TrainingJobsRepository = TrainingJobRepository
+PreprocessingTasksRepository = PreprocessingTaskRepository
 FileArtifactsRepository = FileArtifactRepository
 ModelVersionsRepository = ModelVersionRepository
 PublishRecordsRepository = PublishRecordRepository
@@ -331,6 +339,7 @@ __all__ = [
     "ScriptRepository",
     "DatasetRepository",
     "TrainingJobRepository",
+    "PreprocessingTaskRepository",
     "FileArtifactRepository",
     "ModelVersionRepository",
     "PublishRecordRepository",
@@ -340,6 +349,7 @@ __all__ = [
     "ScriptsRepository",
     "DatasetsRepository",
     "TrainingJobsRepository",
+    "PreprocessingTasksRepository",
     "FileArtifactsRepository",
     "ModelVersionsRepository",
     "PublishRecordsRepository",

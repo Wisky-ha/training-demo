@@ -6,6 +6,11 @@ from .datasets import (
     ParsedDataset,
     UnsupportedDatasetFileError,
 )
+from .preprocessing import (
+    PreprocessingError,
+    PreprocessingNotFoundError,
+    PreprocessingService,
+)
 from .scripts import (
     DuplicateScriptVersionError,
     InvalidScriptFileError,
@@ -24,4 +29,7 @@ __all__ = [
     "InvalidScriptMetadataError",
     "ScriptService",
     "ScriptStorageError",
+    "PreprocessingError",
+    "PreprocessingNotFoundError",
+    "PreprocessingService",
 ]
