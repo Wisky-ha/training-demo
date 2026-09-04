@@ -7,25 +7,31 @@
 在仓库根目录执行：
 
 ```bash
-python -m pip install -r backend/requirements-dev.txt
-uvicorn backend.app.main:app --reload
+python -m pip install -r docs/backend/requirements-dev.txt
+python -m uvicorn --app-dir docs backend.app.main:app --reload
 ```
 
-也可以使用项目配置安装开发依赖：
+也可以先进入 `docs` 目录，再启动后台：
+
+```bash
+cd docs
+python -m uvicorn backend.app.main:app --reload
+```
+
+也可以使用项目配置安装开发依赖（在 `docs` 目录中执行）：
 
 ```bash
 python -m pip install -e ".[dev]"
 ```
 
-也可以在 `backend` 目录中执行 `uvicorn app.main:app --reload`。
-
-默认配置使用 `data/app.db`，模型和上传文件分别保存到 `data/models`、`data/uploads`，目录会在应用启动时自动创建。复制 `backend/.env.example` 为项目根目录或 `backend/.env` 后即可通过环境变量覆盖配置；运行目录下的 `.env` 也支持作为本地覆盖。
+默认配置使用启动目录下的 `data/app.db`，模型和上传文件分别保存到启动目录下的 `data/models`、`data/uploads`，目录会在应用启动时自动创建。复制 `docs/backend/.env.example` 为 `docs/.env` 或 `docs/backend/.env` 后即可通过环境变量覆盖配置；运行目录下的 `.env` 也支持作为本地覆盖。
 
 ## 基础自检
 
 ```bash
+cd docs
 python -c "from backend.app.main import app; from backend.app.core.config import get_settings; from backend.app.db.connection import connect_database; import pandas, numpy, sklearn, joblib; s=get_settings(); c=connect_database(s); print(app.title, s.database_path, c.execute('SELECT 1').fetchone()[0]); c.close()"
-pytest -q backend/tests
+python -m pytest -q backend/tests
 ```
 
 ## 脚本库接口（步骤 7）

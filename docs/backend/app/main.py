@@ -2,7 +2,10 @@
 
 Run locally from the repository root with:
 
-    uvicorn backend.app.main:app --reload
+    python -m uvicorn --app-dir docs backend.app.main:app --reload
+
+Alternatively, run ``python -m uvicorn backend.app.main:app --reload``
+from the ``docs`` directory.
 """
 
 from concurrent.futures import ThreadPoolExecutor
