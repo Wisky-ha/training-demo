@@ -134,13 +134,8 @@ class ModelLifecycleService:
 
     @staticmethod
     def _next_version(session: Session, model_type: ModelType) -> str:
-        import re
-        highest = 0
-        for value in session.scalars(select(ModelVersionORM.version).where(ModelVersionORM.model_type == model_type)):
-            match = re.fullmatch(r"v(\d+)", value or "", flags=re.IGNORECASE)
-            if match:
-                highest = max(highest, int(match.group(1)))
-        return f"v{highest + 1}"
+        from ..db.repositories import ModelVersionRepository
+        return ModelVersionRepository(session).next_version(model_type)
 
     def save(self, request: ModelSaveRequest) -> ModelVersionORM:
         """Register metadata and optionally persist a model file as a READY row."""
@@ -168,15 +163,21 @@ class ModelLifecycleService:
         try:
             model = ModelVersionORM(
                 id=version_id, model_type=request.model_type, version=version_label,
-                model_path=path, preprocessor_path=request.preprocessor_path,
+                model_path=path, model_artifact_id=artifact.id if artifact else None,
+                preprocessor_path=request.preprocessor_path,
                 training_job_id=request.training_job_id, train_script_id=request.train_script_id,
                 train_script_version=request.train_script_version,
+                train_script_source=request.train_script_source,
                 preprocess_script_id=request.preprocess_script_id,
                 preprocess_script_version=request.preprocess_script_version,
+                preprocess_script_source=request.preprocess_script_source,
                 preprocess_used=request.preprocess_used, preprocessor_state=request.preprocessor_state,
                 input_schema=request.input_schema, time_column=request.time_column,
                 feature_columns=request.feature_columns, target_column=request.target_column,
-                metrics=request.metrics, status=request.status,
+                split_strategy=request.split_strategy, split_ratio=request.split_ratio,
+                test_ratio=request.test_ratio, train_data_summary=request.train_data_summary,
+                test_data_summary=request.test_data_summary, metrics=request.metrics,
+                status=request.status,
             )
             self.session.add(model)
             self.session.flush()
@@ -500,21 +501,49 @@ class ModelLifecycleService:
     acknowledge = acknowledge_alert
 
     @staticmethod
+    def _artifact_response(artifact: Any | None) -> dict[str, Any] | None:
+        if artifact is None:
+            return None
+        return {
+            "id": artifact.id,
+            "artifact_type": artifact.artifact_type,
+            "artifact_id": artifact.artifact_id,
+            "relative_path": artifact.relative_path,
+            "size_bytes": artifact.size_bytes,
+            "checksum_sha256": artifact.checksum_sha256,
+            "created_at": artifact.created_at,
+            "updated_at": artifact.updated_at,
+        }
+
+    @staticmethod
     def to_model_response(version: ModelVersionORM) -> dict[str, Any]:
         return {
             "id": version.id, "model_type": version.model_type.value, "version": version.version,
-            "model_path": version.model_path, "preprocessor_path": version.preprocessor_path,
+            "model_path": version.model_path, "model_artifact_id": version.model_artifact_id,
+            "preprocessor_path": version.preprocessor_path,
+            "preprocessor_artifact_id": version.preprocessor_artifact_id,
             "training_job_id": version.training_job_id, "train_script_id": version.train_script_id,
             "train_script_version": version.train_script_version,
+            "train_script_source": version.train_script_source,
             "preprocess_script_id": version.preprocess_script_id,
             "preprocess_script_version": version.preprocess_script_version,
-            "preprocess_used": version.preprocess_used, "input_schema": dict(version.input_schema or {}),
+            "preprocess_script_source": version.preprocess_script_source,
+            "preprocess_used": version.preprocess_used,
+            "preprocessor_state": dict(version.preprocessor_state or {}) if version.preprocessor_state is not None else None,
+            "input_schema": dict(version.input_schema or {}),
             "time_column": version.time_column, "feature_columns": list(version.feature_columns or []),
-            "target_column": version.target_column, "metrics": dict(version.metrics or {}),
+            "target_column": version.target_column,
+            "split_strategy": version.split_strategy.value, "split_ratio": version.split_ratio,
+            "test_ratio": version.test_ratio,
+            "train_data_summary": dict(version.train_data_summary or {}),
+            "test_data_summary": dict(version.test_data_summary or {}),
+            "metrics": dict(version.metrics or {}),
             "status": version.status.value, "health_status": version.health_status.value,
             "is_baseline": version.is_baseline, "is_current": version.is_current,
             "previous_healthy_version_id": version.previous_healthy_version_id,
             "created_at": version.created_at, "published_at": version.published_at,
+            "model_file_metadata": ModelLifecycleService._artifact_response(version.model_artifact),
+            "preprocessor_file_metadata": ModelLifecycleService._artifact_response(version.preprocessor_artifact),
         }
 
     @staticmethod

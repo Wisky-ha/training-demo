@@ -6,7 +6,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from io import BytesIO
 import copy
-import re
 import threading
 import traceback
 from typing import Any
@@ -73,6 +72,8 @@ class TrainingJobService:
     MAX_CHART_POINTS = 1000
     _events: dict[str, threading.Event] = {}
     _events_lock = threading.RLock()
+    _version_locks: dict[ModelType, threading.Lock] = {}
+    _version_locks_guard = threading.RLock()
 
     def __init__(self, session: Session, settings: Settings | None = None) -> None:
         self.session = session
@@ -486,14 +487,52 @@ class TrainingJobService:
         except Exception as exc:
             raise TrainingJobError(f"基线模型预测失败：{exc}", "BASELINE_PREDICTION_FAILED") from exc
 
+    @classmethod
+    def _version_lock(cls, model_type: ModelType) -> threading.Lock:
+        with cls._version_locks_guard:
+            return cls._version_locks.setdefault(model_type, threading.Lock())
+
     @staticmethod
     def _next_version(session: Session, model_type: ModelType) -> str:
-        highest = 0
-        for value in session.scalars(select(ModelVersionORM.version).where(ModelVersionORM.model_type == model_type)):
-            match = re.fullmatch(r"v(\d+)", value or "", flags=re.IGNORECASE)
-            if match:
-                highest = max(highest, int(match.group(1)))
-        return f"v{highest + 1}"
+        return ModelVersionRepository(session).next_version(model_type)
+
+    @staticmethod
+    def _frame_data_summary(
+        times: pd.Series, features: pd.DataFrame, target: pd.Series,
+    ) -> dict[str, Any]:
+        """Persist a JSON-safe summary of exactly one split."""
+        values = target.to_numpy(dtype=float)
+        return {
+            "row_count": int(len(target)),
+            "columns": [str(column) for column in features.columns],
+            "time_range": {
+                "start": DatasetService._json_value(times.iloc[0]) if len(times) else None,
+                "end": DatasetService._json_value(times.iloc[-1]) if len(times) else None,
+            },
+            "target": {
+                "min": float(np.min(values)) if len(values) else None,
+                "max": float(np.max(values)) if len(values) else None,
+                "mean": float(np.mean(values)) if len(values) else None,
+            },
+        }
+
+    @staticmethod
+    def _input_schema(frame: pd.DataFrame, dataset: DatasetORM, feature_columns: list[str]) -> dict[str, Any]:
+        columns = [str(column) for column in frame.columns]
+        types = {
+            column: dataset.column_types.get(column, "number" if pd.api.types.is_numeric_dtype(frame[column]) else "string")
+            for column in columns
+        }
+        types[dataset.time_column] = "datetime"
+        return {
+            "columns": columns,
+            "required_columns": [dataset.time_column, *feature_columns],
+            "column_types": types,
+            "time_column": dataset.time_column,
+            "time_format": (dataset.time_parse or {}).get("format"),
+            "target_column": dataset.target_column,
+            "extra_columns": "reject",
+        }
 
     def _save_version(
         self, job: TrainingJobORM, dataset: DatasetORM, train_script: ScriptORM,
@@ -501,8 +540,25 @@ class TrainingJobService:
         X_test: pd.DataFrame, y_train: pd.Series, y_test: pd.Series,
         ordered_times: pd.Series, result: Any, predictions: np.ndarray,
     ) -> tuple[ModelVersionORM, dict[str, Any], str]:
+        # Version labels are generated while holding a per-model-family lock;
+        # the database unique constraint remains the cross-process safeguard.
+        with self._version_lock(job.model_type):
+            return self._save_version_locked(
+                job, dataset, train_script, task, frame, X_train, X_test,
+                y_train, y_test, ordered_times, result, predictions,
+            )
+
+    def _save_version_locked(
+        self, job: TrainingJobORM, dataset: DatasetORM, train_script: ScriptORM,
+        task: PreprocessingTaskORM | None, frame: pd.DataFrame, X_train: pd.DataFrame,
+        X_test: pd.DataFrame, y_train: pd.Series, y_test: pd.Series,
+        ordered_times: pd.Series, result: Any, predictions: np.ndarray,
+    ) -> tuple[ModelVersionORM, dict[str, Any], str]:
         actual = y_test.to_numpy(dtype=float)
+        train_times = ordered_times.iloc[:len(y_train)].reset_index(drop=True)
         test_times = ordered_times.iloc[len(y_train):].reset_index(drop=True)
+        feature_columns = [str(item) for item in X_train.columns]
+        version_label = self._next_version(self.session, job.model_type)
         baseline, baseline_predictions, baseline_source = self._baseline_prediction(
             job, X_train, y_train, X_test
         )
@@ -515,7 +571,7 @@ class TrainingJobService:
                 candidate_id=None,
                 baseline_id=baseline.id,
                 baseline_version=baseline.version,
-                candidate_version=self._next_version(self.session, job.model_type),
+                candidate_version=version_label,
             )
         except ModelEvaluationError as exc:
             raise TrainingJobError(str(exc), exc.code) from exc
@@ -550,33 +606,40 @@ class TrainingJobService:
         # comparison payload is complete in the initial row.
         comparison["candidate"]["model_version_id"] = version_id
         artifact = self.storage.save_model(version_id, model_bytes)
+        preprocessor_artifact = None
         try:
+            preprocessor_artifact = (
+                self.storage.metadata(ArtifactType.PREPROCESSOR, task.id)
+                if task and task.preprocess_used else None
+            )
             version = self.version_repository.create(
-            id=version_id,
-            model_type=job.model_type,
-            version=evaluation["model_comparison"]["candidate"].get("version") or self._next_version(self.session, job.model_type),
-            model_path=artifact.relative_path,
-            training_job_id=job.id,
-            train_script_id=train_script.id,
-            train_script_version=train_script.version,
-            train_script_source=train_script.source_code,
-            preprocess_script_id=task.preprocess_script_id if task and task.preprocess_used else None,
-            preprocess_script_version=(task.preprocess_script.version if task and task.preprocess_used and task.preprocess_script else None),
-            preprocess_script_source=(task.preprocess_script.source_code if task and task.preprocess_used and task.preprocess_script else None),
-            preprocess_used=bool(task and task.preprocess_used),
-            preprocessor_path=task.preprocessor_path if task and task.preprocess_used else None,
-            preprocessor_state=task.preprocessor_state if task and task.preprocess_used else None,
-            input_schema={"columns": list(frame.columns), "column_types": dict(dataset.column_types)},
-            time_column=dataset.time_column,
-            feature_columns=[str(item) for item in X_train.columns],
-            target_column=dataset.target_column,
-            split_strategy=job.split_strategy,
-            split_ratio=job.split_ratio,
-            test_ratio=job.test_ratio,
-            train_data_summary={"row_count": len(X_train), "columns": list(X_train.columns)},
-            test_data_summary={"row_count": len(X_test), "columns": list(X_test.columns)},
-            metrics=evaluation,
-            status=ModelVersionStatus.DRAFT,
+                id=version_id,
+                model_type=job.model_type,
+                version=version_label,
+                model_path=artifact.relative_path,
+                model_artifact_id=artifact.id,
+                training_job_id=job.id,
+                train_script_id=train_script.id,
+                train_script_version=train_script.version,
+                train_script_source=str(train_script.source_code),
+                preprocess_script_id=task.preprocess_script_id if task and task.preprocess_used else None,
+                preprocess_script_version=(task.preprocess_script.version if task and task.preprocess_used and task.preprocess_script else None),
+                preprocess_script_source=(str(task.preprocess_script.source_code) if task and task.preprocess_used and task.preprocess_script else None),
+                preprocess_used=bool(task and task.preprocess_used),
+                preprocessor_path=task.preprocessor_path if task and task.preprocess_used else None,
+                preprocessor_artifact_id=preprocessor_artifact.id if preprocessor_artifact else None,
+                preprocessor_state=copy.deepcopy(task.preprocessor_state) if task and task.preprocess_used else None,
+                input_schema=self._input_schema(frame, dataset, feature_columns),
+                time_column=dataset.time_column,
+                feature_columns=feature_columns,
+                target_column=dataset.target_column,
+                split_strategy=job.split_strategy,
+                split_ratio=job.split_ratio,
+                test_ratio=job.test_ratio,
+                train_data_summary=self._frame_data_summary(train_times, X_train, y_train),
+                test_data_summary=self._frame_data_summary(test_times, X_test, y_test),
+                metrics=copy.deepcopy(evaluation),
+                status=ModelVersionStatus.DRAFT,
             )
         except Exception:
             # File storage and the SQL transaction cannot be atomic together.

@@ -131,12 +131,17 @@ def _upgrade_model_version_columns(engine: Engine) -> None:
     if engine.dialect.name != "sqlite":
         return
     columns = {item["name"] for item in inspect(engine).get_columns("model_versions")}
-    if "health_status" not in columns:
-        with engine.begin() as connection:
-            connection.execute(text(
-                "ALTER TABLE model_versions ADD COLUMN health_status "
-                "VARCHAR(8) NOT NULL DEFAULT 'HEALTHY'"
-            ))
+    additions = {
+        "health_status": "VARCHAR(8) NOT NULL DEFAULT 'HEALTHY'",
+        "model_artifact_id": "VARCHAR(36)",
+        "preprocessor_artifact_id": "VARCHAR(36)",
+    }
+    with engine.begin() as connection:
+        for name, definition in additions.items():
+            if name not in columns:
+                connection.execute(text(
+                    f"ALTER TABLE model_versions ADD COLUMN {name} {definition}"
+                ))
 
 
 def _upgrade_model_alert_columns(engine: Engine) -> None:

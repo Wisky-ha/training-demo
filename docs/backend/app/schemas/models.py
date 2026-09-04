@@ -7,7 +7,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..domain.enums import AlertStatus, HealthStatus, ModelType, ModelVersionStatus, RollbackStatus
+from ..domain.enums import (
+    AlertStatus,
+    HealthStatus,
+    ModelType,
+    ModelVersionStatus,
+    RollbackStatus,
+    SplitStrategy,
+)
 
 
 class ModelSaveRequest(BaseModel):
@@ -30,14 +37,21 @@ class ModelSaveRequest(BaseModel):
     training_job_id: str | None = Field(default=None, max_length=36)
     train_script_id: str | None = Field(default=None, max_length=36)
     train_script_version: str | None = Field(default=None, max_length=100)
+    train_script_source: str | None = None
     preprocess_script_id: str | None = Field(default=None, max_length=36)
     preprocess_script_version: str | None = Field(default=None, max_length=100)
+    preprocess_script_source: str | None = None
     preprocess_used: bool = False
     preprocessor_state: dict[str, Any] | None = None
     input_schema: dict[str, Any] = Field(default_factory=dict)
     time_column: str | None = None
     feature_columns: list[str] = Field(default_factory=list)
     target_column: str | None = None
+    split_strategy: SplitStrategy = SplitStrategy.TIME_ORDERED
+    split_ratio: float = Field(default=0.8, gt=0, lt=1)
+    test_ratio: float = Field(default=0.2, gt=0, lt=1)
+    train_data_summary: dict[str, Any] = Field(default_factory=dict)
+    test_data_summary: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
     status: ModelVersionStatus = ModelVersionStatus.READY
 
@@ -55,17 +69,27 @@ class ModelVersionResponse(BaseModel):
     model_type: ModelType
     version: str
     model_path: str
+    model_artifact_id: str | None
     preprocessor_path: str | None
+    preprocessor_artifact_id: str | None
     training_job_id: str | None
     train_script_id: str | None
     train_script_version: str | None
+    train_script_source: str | None
     preprocess_script_id: str | None
     preprocess_script_version: str | None
+    preprocess_script_source: str | None
     preprocess_used: bool
+    preprocessor_state: dict[str, Any] | None
     input_schema: dict[str, Any]
     time_column: str | None
     feature_columns: list[str]
     target_column: str | None
+    split_strategy: SplitStrategy
+    split_ratio: float
+    test_ratio: float
+    train_data_summary: dict[str, Any]
+    test_data_summary: dict[str, Any]
     metrics: dict[str, Any]
     status: ModelVersionStatus
     health_status: HealthStatus
@@ -74,6 +98,8 @@ class ModelVersionResponse(BaseModel):
     previous_healthy_version_id: str | None
     created_at: datetime
     published_at: datetime | None
+    model_file_metadata: dict[str, Any] | None = None
+    preprocessor_file_metadata: dict[str, Any] | None = None
 
 
 class PublishRequest(BaseModel):

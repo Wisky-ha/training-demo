@@ -129,11 +129,13 @@ def save_existing_model(model_id: str, body: ModelSaveRequest, request: Request,
                 raise ModelLifecycleError("模型制品不是有效的 base64", "MODEL_ARTIFACT_INVALID") from exc
             artifact = service.storage.save_model(model_id, raw)
             existing.model_path = artifact.relative_path
+            existing.model_artifact_id = artifact.id
         for field in ("preprocessor_path", "training_job_id", "train_script_id",
-                      "train_script_version", "preprocess_script_id",
-                      "preprocess_script_version", "input_schema", "feature_columns",
-                      "time_column", "target_column", "metrics", "preprocess_used",
-                      "preprocessor_state"):
+                      "train_script_version", "train_script_source", "preprocess_script_id",
+                      "preprocess_script_version", "preprocess_script_source", "input_schema",
+                      "feature_columns", "time_column", "target_column", "split_strategy",
+                      "split_ratio", "test_ratio", "train_data_summary", "test_data_summary",
+                      "metrics", "preprocess_used", "preprocessor_state"):
             value = getattr(body, field)
             if value is not None and value != [] and value != {}:
                 setattr(existing, field, value)

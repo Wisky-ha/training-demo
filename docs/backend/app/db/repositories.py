@@ -316,6 +316,26 @@ class FileArtifactRepository(Repository[FileArtifactORM]):
 class ModelVersionRepository(Repository[ModelVersionORM]):
     model = ModelVersionORM
 
+    def version_exists(self, model_type: ModelType, version: str) -> bool:
+        """Check the type-scoped immutable version key before insertion."""
+
+        return self.session.scalar(select(ModelVersionORM.id).where(
+            ModelVersionORM.model_type == model_type,
+            ModelVersionORM.version == version,
+        )) is not None
+
+    def next_version(self, model_type: ModelType) -> str:
+        """Allocate the next generated ``vN`` label within one model type."""
+
+        highest = 0
+        for version in self.session.scalars(select(ModelVersionORM.version).where(
+            ModelVersionORM.model_type == model_type
+        )):
+            match = re.fullmatch(r"v(\d+)", (version or "").strip(), flags=re.IGNORECASE)
+            if match:
+                highest = max(highest, int(match.group(1)))
+        return f"v{highest + 1}"
+
     def get_baseline(self, model_type: ModelType) -> ModelVersionORM | None:
         """Return the system-owned baseline for one model family."""
 

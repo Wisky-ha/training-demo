@@ -509,7 +509,16 @@ class ModelVersionORM(Base):
     )
     version: Mapped[str] = mapped_column(String(100), nullable=False)
     model_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    # Explicit links to the generic artifact metadata rows keep the path,
+    # size, and checksum associated with this immutable version.  The paths
+    # remain denormalized for compatibility with older model_versions rows.
+    model_artifact_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("file_artifacts.id", ondelete="SET NULL"), nullable=True
+    )
     preprocessor_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    preprocessor_artifact_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("file_artifacts.id", ondelete="SET NULL"), nullable=True
+    )
     training_job_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("training_jobs.id"), nullable=True
     )
@@ -553,6 +562,12 @@ class ModelVersionORM(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    model_artifact: Mapped[FileArtifactORM | None] = relationship(
+        "FileArtifactORM", foreign_keys=[model_artifact_id], lazy="joined"
+    )
+    preprocessor_artifact: Mapped[FileArtifactORM | None] = relationship(
+        "FileArtifactORM", foreign_keys=[preprocessor_artifact_id], lazy="joined"
+    )
     model_type_record: Mapped[ModelTypeORM] = relationship(
         "ModelTypeORM", foreign_keys=[model_type], back_populates="model_versions"
     )
