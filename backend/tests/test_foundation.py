@@ -43,3 +43,16 @@ def test_fastapi_entrypoint_and_health_endpoint():
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_default_vite_origins_are_allowed_for_cors():
+    with TestClient(app) as client:
+        response = client.options(
+            "/api/health",
+            headers={
+                "Origin": "http://127.0.0.1:5173",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"

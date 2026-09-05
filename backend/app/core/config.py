@@ -90,7 +90,7 @@ class Settings(BaseSettings):
         ),
     )
     allowed_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:5173"],
+        default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"],
         validation_alias=AliasChoices("APP_ALLOWED_ORIGINS", "APP_APP_ALLOWED_ORIGINS"),
     )
 

@@ -4,19 +4,19 @@
 
 ## 1. 安装与启动
 
-从仓库根目录（包含 `docs/` 的目录）执行：
+从仓库根目录执行：
 
 ```bash
-python -m pip install -r docs/backend/requirements-dev.txt
-python -m uvicorn --app-dir docs backend.app.main:app --reload
+python -m pip install -r backend/requirements-dev.txt
+python -m uvicorn backend.app.main:app --reload
 ```
 
-或者进入 `docs/` 后执行：
+或者进入 `backend/` 后执行：
 
 ```bash
-cd docs
-python -m pip install -e "backend[dev]"
-python -m uvicorn backend.app.main:app --reload
+cd backend
+python -m pip install -e ".[dev]"
+python -m uvicorn app.main:app --reload
 ```
 
 健康检查：
@@ -30,7 +30,7 @@ curl http://127.0.0.1:8000/health
 
 ### 配置
 
-复制 `backend/.env.example` 为 `docs/.env` 或 `docs/backend/.env`，或直接设置环境变量。环境变量优先级由 pydantic-settings 处理；`APP_` 名称是推荐写法，数据库也兼容 `DATABASE_URL`。
+复制 `backend/.env.example` 为 `backend/.env`，或直接设置环境变量。环境变量优先级由 pydantic-settings 处理；`APP_` 名称是推荐写法，数据库也兼容 `DATABASE_URL`。
 
 | 变量 | 默认值/说明 |
 |---|---|
@@ -45,7 +45,7 @@ curl http://127.0.0.1:8000/health
 | `APP_MAX_DATASET_SIZE_BYTES` | 默认 50 MiB |
 | `APP_ALLOWED_ORIGINS` | JSON 数组，默认 localhost/127.0.0.1:5173 |
 
-启动生命周期会创建存储目录、执行 `create_all`/兼容升级，并幂等创建三种模型类型和 `v0-baseline`。显式初始化命令如下（在 `docs/` 中）：
+启动生命周期会创建存储目录、执行 `create_all`/兼容升级，并幂等创建三种模型类型和 `v0-baseline`。显式初始化命令如下（在仓库根目录中）：
 
 ```bash
 python -m backend.app.cli init-db
@@ -208,7 +208,6 @@ curl -X POST http://127.0.0.1:8000/api/mcp/predict \
 ## 5. 验证命令和限制
 
 ```bash
-cd docs
 python -m pytest -q backend/tests
 python -m compileall -q backend/app backend/demo
 python -m backend.app.cli init-db
