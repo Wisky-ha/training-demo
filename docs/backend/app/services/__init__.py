@@ -34,6 +34,16 @@ from .preprocessing import (
     PreprocessingNotFoundError,
     PreprocessingService,
 )
+from .prediction_validation import (
+    PredictionError,
+    PredictionInputService,
+    PredictionInputValidationError,
+    PredictionInputValidationResult,
+    PredictionInputValidationService,
+    PredictionService,
+    PredictionValidationError,
+    PredictionValidationService,
+)
 from .scripts import (
     DuplicateScriptVersionError,
     InvalidScriptFileError,
@@ -55,6 +65,14 @@ __all__ = [
     "PreprocessingError",
     "PreprocessingNotFoundError",
     "PreprocessingService",
+    "PredictionError",
+    "PredictionInputService",
+    "PredictionInputValidationError",
+    "PredictionInputValidationResult",
+    "PredictionInputValidationService",
+    "PredictionService",
+    "PredictionValidationError",
+    "PredictionValidationService",
     "BASELINE_VERSION",
     "ModelBaselineError",
     "ModelBaselineService",
