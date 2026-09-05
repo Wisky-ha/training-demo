@@ -44,11 +44,12 @@ from ..datasets.service import DatasetService
 
 
 class PreprocessingError(ValueError):
-    """A safe, user-facing preprocessing error with a stable error code."""
+    """A safe, user-facing preprocessing error with stable details."""
 
-    def __init__(self, message: str, code: str = "PREPROCESS_FAILED") -> None:
+    def __init__(self, message: str, code: str = "PREPROCESS_FAILED", **details: Any) -> None:
         super().__init__(message)
         self.code = code
+        self.details = details
         self.task_id: str | None = None
 
 
@@ -453,6 +454,11 @@ class PreprocessingService:
                 failed.stage = PreprocessingStage.FAILED
                 failed.stage_started_at = _now()
                 failed.error_message = message
+                failed.error_code = getattr(exc, "code", "PREPROCESS_FAILED")
+                failed.error_details = {
+                    **dict(getattr(exc, "details", {}) or {}),
+                    **({"task_id": task_id} if task_id else {}),
+                }
                 failed.finished_at = _now()
                 failed.logs = [*failed.logs, f"失败：{message}"]
                 failed.preprocessor_path = None
@@ -482,6 +488,8 @@ class PreprocessingService:
             progress_stage=task.stage,
             logs=list(task.logs or []),
             error_message=task.error_message,
+            error_code=task.error_code,
+            error_details=dict(task.error_details or {}),
             config=dict(task.config or {}),
             input_row_count=task.input_row_count,
             output_row_count=task.output_row_count,

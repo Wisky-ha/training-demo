@@ -33,6 +33,7 @@ def _error(exc: PreprocessingError, *, not_found: bool = False) -> HTTPException
         detail={
             "code": exc.code,
             "message": str(exc),
+            **dict(getattr(exc, "details", {}) or {}),
             **({"task_id": exc.task_id} if exc.task_id else {}),
         },
     )

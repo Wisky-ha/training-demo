@@ -106,6 +106,7 @@ def initialize_database(
     _configure_sqlite_foreign_keys(active_engine)
     Base.metadata.create_all(active_engine)
     _upgrade_training_job_columns(active_engine)
+    _upgrade_preprocessing_task_columns(active_engine)
     _upgrade_model_version_columns(active_engine)
     _upgrade_model_alert_columns(active_engine)
     _upgrade_publish_record_columns(active_engine)
@@ -124,6 +125,22 @@ def _upgrade_publish_record_columns(engine: Engine) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_publish_records_idempotency_key "
             "ON publish_records (idempotency_key) WHERE idempotency_key IS NOT NULL"
         ))
+
+
+def _upgrade_preprocessing_task_columns(engine: Engine) -> None:
+    """Add structured failure fields to older preprocessing task tables."""
+    if engine.dialect.name != "sqlite":
+        return
+    columns = {item["name"] for item in inspect(engine).get_columns("preprocessing_tasks")}
+    with engine.begin() as connection:
+        if "error_code" not in columns:
+            connection.execute(text(
+                "ALTER TABLE preprocessing_tasks ADD COLUMN error_code VARCHAR(100)"
+            ))
+        if "error_details" not in columns:
+            connection.execute(text(
+                "ALTER TABLE preprocessing_tasks ADD COLUMN error_details JSON NOT NULL DEFAULT '{}'"
+            ))
 
 
 def _upgrade_model_version_columns(engine: Engine) -> None:
@@ -168,6 +185,8 @@ def _upgrade_training_job_columns(engine: Engine) -> None:
         "preprocessing_task_id": "VARCHAR(36)",
         "started_at": "DATETIME",
         "current_stage": "VARCHAR(100)",
+        "error_code": "VARCHAR(100)",
+        "error_details": "JSON NOT NULL DEFAULT '{}'",
         "config": "JSON NOT NULL DEFAULT '{}'",
         "config_summary": "JSON NOT NULL DEFAULT '{}'",
         "model_version_id": "VARCHAR(36)",

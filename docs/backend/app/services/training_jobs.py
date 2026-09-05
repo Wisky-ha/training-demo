@@ -6,8 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from io import BytesIO
 import copy
+import logging
 import threading
-import traceback
 from typing import Any
 from uuid import uuid4
 
@@ -48,12 +48,16 @@ from .preprocessing import PreprocessingError, PreprocessingService
 from .training_executor import TrainingScriptExecutor
 
 
-class TrainingJobError(ValueError):
-    """A safe API error with a stable machine-readable code."""
+logger = logging.getLogger(__name__)
 
-    def __init__(self, message: str, code: str = "TRAINING_JOB_FAILED") -> None:
+
+class TrainingJobError(ValueError):
+    """A safe API error with a stable machine-readable code and details."""
+
+    def __init__(self, message: str, code: str = "TRAINING_JOB_FAILED", **details: Any) -> None:
         super().__init__(message)
         self.code = code
+        self.details = details
         self.job_id: str | None = None
 
 
@@ -282,6 +286,8 @@ class TrainingJobService:
         job.started_at = None
         job.finished_at = None
         job.error_message = None
+        job.error_code = None
+        job.error_details = {}
         job.model_version_id = None
         job.logs = [*(job.logs or []), "PENDING：已提交失败重试"]
         self.session.commit()
@@ -326,21 +332,32 @@ class TrainingJobService:
         if self._cancelled(job.id) or job.status is TrainingJobStatus.CANCELLED:
             raise _CancellationRequested
 
-    def _fail(self, job_id: str, message: str, details: str | None = None) -> None:
+    def _fail(
+        self,
+        job_id: str,
+        message: str,
+        error_code: str = "TRAINING_JOB_FAILED",
+        details: dict[str, Any] | None = None,
+    ) -> None:
         self.session.rollback()
         job = self.repository.get(job_id)
         if job is None or job.status is TrainingJobStatus.CANCELLED:
             return
         now = self._now()
+        safe_details = dict(details or {})
+        safe_details.pop("traceback", None)
+        safe_details.pop("stack_trace", None)
         job.status = TrainingJobStatus.FAILED
         job.progress_stage = "FAILED"
         job.current_stage = "失败"
         job.stage_started_at = now
         job.error_message = message
+        job.error_code = error_code
+        job.error_details = safe_details
         job.finished_at = now
-        entries = [*(job.logs or []), f"FAILED：{message}"]
-        if details:
-            entries.append(details)
+        entries = [*(job.logs or []), f"FAILED[{error_code}]：{message}"]
+        if safe_details:
+            entries.append(f"异常详情：{safe_details}")
         job.logs = entries
         self.session.commit()
 
@@ -741,11 +758,21 @@ class TrainingJobService:
         except (TrainingJobError, PreprocessingError) as exc:
             if artifact_id:
                 self._discard_candidate(artifact_id)
-            self._fail(job_id, str(exc), getattr(exc, "code", None))
+            details = dict(getattr(exc, "details", {}) or {})
+            if getattr(exc, "task_id", None):
+                details["task_id"] = exc.task_id
+            details.setdefault("exception_type", type(exc).__name__)
+            self._fail(job_id, str(exc), getattr(exc, "code", "TRAINING_JOB_FAILED"), details)
         except Exception as exc:
             if artifact_id:
                 self._discard_candidate(artifact_id)
-            self._fail(job_id, f"{type(exc).__name__}: {exc}", traceback.format_exc())
+            logger.exception("training job failed job_id=%s", job_id)
+            self._fail(
+                job_id,
+                "训练任务执行失败",
+                "TRAINING_JOB_FAILED",
+                {"exception_type": type(exc).__name__},
+            )
         finally:
             self._remove_event(job_id)
 
@@ -810,6 +837,8 @@ class TrainingJobService:
             "stage": job.current_stage,
             "stage_started_at": job.stage_started_at, "started_at": job.started_at,
             "logs": list(job.logs or []), "error_message": job.error_message,
+            "error_code": job.error_code,
+            "error_details": dict(job.error_details or {}),
             "config": dict(job.config or {}), "config_summary": dict(job.config_summary or {}),
             "model_version_id": job.model_version_id,
             "train_row_count": job.train_row_count, "test_row_count": job.test_row_count,

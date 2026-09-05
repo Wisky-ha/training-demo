@@ -44,6 +44,8 @@ class TrainingJobResponse(BaseModel):
     stage_started_at: datetime | None
     logs: list[str]
     error_message: str | None
+    error_code: str | None = None
+    error_details: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any]
     config_summary: dict[str, Any]
     model_version_id: str | None

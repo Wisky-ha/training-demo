@@ -321,6 +321,10 @@ class PreprocessingTaskORM(Base):
         default=PreprocessingStage.WAITING,
     )
     logs: Mapped[list[str]] = mapped_column(MutableList.as_mutable(JSON), nullable=False, default=list)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_details: Mapped[dict[str, Any]] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False, default=dict
+    )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     config: Mapped[dict[str, Any]] = mapped_column(MutableDict.as_mutable(JSON), nullable=False, default=dict)
     input_row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -450,6 +454,10 @@ class TrainingJobORM(Base):
     current_stage: Mapped[str | None] = mapped_column(String(100), nullable=True)
     stage_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     logs: Mapped[list[str]] = mapped_column(MutableList.as_mutable(JSON), nullable=False, default=list)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_details: Mapped[dict[str, Any]] = mapped_column(
+        MutableDict.as_mutable(JSON), nullable=False, default=dict
+    )
     config: Mapped[dict[str, Any]] = mapped_column(MutableDict.as_mutable(JSON), nullable=False, default=dict)
     config_summary: Mapped[dict[str, Any]] = mapped_column(MutableDict.as_mutable(JSON), nullable=False, default=dict)
     model_version_id: Mapped[str | None] = mapped_column(

@@ -201,7 +201,11 @@ def test_unusable_backups_are_skipped_and_missing_backup_is_structured(tmp_path)
         assert api.publish(fifth).status_code == 200
         response = api.abnormal("electric_load", "v5")
         assert response.status_code == 409
+        assert response.json()["success"] is False
+        assert response.json()["error_code"] == "NO_HEALTHY_BACKUP"
+        assert response.json()["details"]["rollback_record_id"]
         assert response.json()["detail"]["code"] == "NO_HEALTHY_BACKUP"
+        assert "traceback" not in str(response.json()).lower()
         assert api.client.get("/api/alerts", params={"active_only": True}).json()
     finally:
         client.__exit__(None, None, None)

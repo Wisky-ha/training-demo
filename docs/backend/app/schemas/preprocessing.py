@@ -57,6 +57,8 @@ class PreprocessingTaskResponse(BaseModel):
     progress_stage: PreprocessingStage
     logs: list[str]
     error_message: str | None
+    error_code: str | None = None
+    error_details: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any]
     input_row_count: int | None
     output_row_count: int | None

@@ -182,8 +182,11 @@ def test_failure_persists_exception_log_and_keeps_production_model(training_api)
     )
     job = _wait_for(client, response.json()["id"], "FAILED")
     assert "bad training data" in (job["error_message"] or "")
+    assert job["error_code"] == "TRAIN_EXECUTION_FAILED"
+    assert job["error_details"]["exception_type"] == "TrainingJobError"
     assert any("before boom" in item for item in job["logs"])
-    assert job["finished_at"]
+    assert job["finished_at"] and job["created_at"] <= job["finished_at"]
+    assert "traceback" not in str(job).lower()
     with factory() as session:
         assert session.scalar(select(ModelVersionORM).where(ModelVersionORM.training_job_id == response.json()["id"])) is None
         current = session.get(ModelVersionORM, current_id)

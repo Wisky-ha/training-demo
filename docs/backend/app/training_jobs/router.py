@@ -28,9 +28,12 @@ def _error(exc: TrainingJobError) -> HTTPException:
         response_status = status.HTTP_409_CONFLICT
     else:
         response_status = status.HTTP_400_BAD_REQUEST
+    details = dict(getattr(exc, "details", {}) or {})
+    if exc.job_id:
+        details["job_id"] = exc.job_id
     return HTTPException(
         status_code=response_status,
-        detail={"code": code, "message": str(exc), **({"job_id": exc.job_id} if exc.job_id else {})},
+        detail={"code": code, "message": str(exc), **details},
     )
 
 

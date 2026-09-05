@@ -83,7 +83,10 @@ class MCPModelService:
         cause_code = getattr(exc, "code", None)
         if cause_code:
             details = {"cause_code": cause_code, **details}
-        return MCPServiceError(f"预处理失败：{exc}", "PREPROCESS_FAILED", **details)
+        details.setdefault("exception_type", type(exc).__name__)
+        # The underlying exception is logged by the application boundary; the
+        # tool response only carries a stable, user-readable message.
+        return MCPServiceError("预处理失败", "PREPROCESS_FAILED", **details)
 
     def _load_model(self, version: ModelVersionORM) -> Any:
         """Verify and restore the managed model artifact for one version."""
@@ -176,7 +179,14 @@ class MCPModelService:
         except PredictionInputValidationError as exc:
             raise MCPServiceError(str(exc), exc.code, **exc.details) from exc
 
-        frame = self._transform_with_version_state(version, validated.frame)
+        try:
+            frame = self._transform_with_version_state(version, validated.frame)
+        except MCPServiceError:
+            raise
+        except Exception as exc:
+            # Keep even an adapter/implementation failure inside the safe
+            # preprocessing boundary; transports must never expose a raw 500.
+            raise self._preprocess_error(exc) from exc
         missing = [column for column in validated.feature_columns if column not in frame.columns]
         if missing:
             raise MCPServiceError(

@@ -145,7 +145,11 @@ def test_script_execution_and_result_validation_errors_are_persisted(preprocessi
         json={"model_type": "electric_load", "dataset_id": dataset_id, "preprocess_script_id": script_id},
     )
     assert response.status_code == 400
+    assert response.json()["success"] is False
+    assert response.json()["error_code"] == code
+    assert response.json()["details"]["task_id"]
     assert response.json()["detail"]["code"] == code
+    assert "traceback" not in str(response.json()).lower()
     task_id = response.json()["detail"]["task_id"]
     task = client.get(f"/api/preprocessing-tasks/{task_id}").json()
     assert task["status"] == "FAILED"

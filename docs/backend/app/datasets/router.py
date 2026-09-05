@@ -48,9 +48,11 @@ def _validation_error(exc: CSVParseError) -> JSONResponse:
     return JSONResponse(
         status_code=response_status,
         content={
-            # Existing clients used ``detail`` as a display string.  The
-            # structured fields below allow clients to branch on stable codes
-            # without breaking that upload-flow contract.
+            "success": False,
+            "error_code": error_code,
+            "message": str(exc),
+            "details": {"issues": issues},
+            # Keep the original upload response fields for existing clients.
             "detail": str(exc),
             "error": {"code": error_code, "message": str(exc), "issues": issues},
             "errors": issues,

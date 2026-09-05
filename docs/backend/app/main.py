@@ -13,9 +13,16 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .core.config import Settings, get_settings
+from .core.errors import (
+    http_exception_handler,
+    request_validation_exception_handler,
+    unhandled_exception_handler,
+)
 from .db.session import (
     create_database_engine,
     create_session_factory,
@@ -68,6 +75,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # All routers may continue raising their established domain exceptions;
+    # this application boundary turns them into one safe response envelope.
+    application.add_exception_handler(
+        StarletteHTTPException, http_exception_handler
+    )
+    application.add_exception_handler(
+        RequestValidationError, request_validation_exception_handler
+    )
+    application.add_exception_handler(Exception, unhandled_exception_handler)
     application.state.settings = active_settings
     application.state.session_factory = session_factory
     application.state.training_job_executor = training_job_executor
