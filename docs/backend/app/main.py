@@ -27,6 +27,7 @@ from .preprocessing.router import router as preprocessing_router
 from .scripts.router import router as script_router
 from .training_jobs.router import router as training_job_router
 from .model_router import alerts_router, router as model_router
+from .mcp_router import router as mcp_router
 from .services.model_baseline import ModelBaselineService
 
 
@@ -91,6 +92,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(training_job_router)
     application.include_router(model_router)
     application.include_router(alerts_router)
+    application.include_router(mcp_router)
 
     @application.get("/health", tags=["system"])
     @application.get("/api/health", include_in_schema=False)
