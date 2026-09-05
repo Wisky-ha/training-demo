@@ -14,6 +14,7 @@ from .domain.enums import HealthStatus, ModelType, ModelVersionStatus
 from .schemas.models import (
     AbnormalRequest,
     LifecycleOperationResponse,
+    ModelAbnormalRequest,
     ModelAlertResponse,
     ModelSaveRequest,
     ModelVersionResponse,
@@ -25,6 +26,7 @@ from .services.model_lifecycle import (
     ModelLifecycleError,
     ModelLifecycleService,
     ModelNotFoundError,
+    ModelVersionNotFoundError,
     NoHealthyRollbackError,
 )
 
@@ -37,7 +39,7 @@ def _service(request: Request, session: Session) -> ModelLifecycleService:
 
 
 def _error(exc: ModelLifecycleError) -> HTTPException:
-    if isinstance(exc, ModelNotFoundError) or exc.code == "ALERT_NOT_FOUND":
+    if isinstance(exc, (ModelNotFoundError, ModelVersionNotFoundError)) or exc.code == "ALERT_NOT_FOUND":
         response_status = status.HTTP_404_NOT_FOUND
     elif exc.code in {
         "PUBLISH_CONFIRMATION_REQUIRED", "MODEL_ARTIFACT_INVALID",
@@ -49,7 +51,8 @@ def _error(exc: ModelLifecycleError) -> HTTPException:
         "MODEL_VERSION_ALREADY_EXISTS", "MODEL_LIFECYCLE_CONFLICT", "IDEMPOTENCY_KEY_CONFLICT",
         "PUBLISH_STATE_INVALID", "OFFLINE_STATE_INVALID", "ROLLBACK_STATE_INVALID",
         "ROLLBACK_TARGET_INVALID", "ROLLBACK_TARGET_NOT_FOUND", "MODEL_HEALTH_INVALID",
-        "ABNORMAL_STATE_INVALID", "NO_HEALTHY_ROLLBACK_VERSION", "MODEL_BASELINE_IMMUTABLE",
+        "ABNORMAL_STATE_INVALID", "NO_HEALTHY_BACKUP", "NO_HEALTHY_ROLLBACK_VERSION",
+        "MODEL_BASELINE_IMMUTABLE", "MODEL_BASELINE_INVALID",
     }:
         response_status = status.HTTP_409_CONFLICT
     else:
@@ -207,13 +210,34 @@ def rollback_model(model_id: str, request: Request, body: RollbackRequest | None
         raise _error(exc) from exc
 
 
+@router.post("/abnormal", response_model=LifecycleOperationResponse)
+def abnormal_model_by_type(body: ModelAbnormalRequest, request: Request,
+                           session: Session = Depends(get_session)):
+    """Mark a type-scoped version abnormal and fail over atomically."""
+    service = _service(request, session)
+    try:
+        version = service._resolve_model_version(body.model_type, body.model_version)
+        alert, rollback, target = service.mark_model_abnormal(
+            body.model_type, body.model_version,
+            reason=body.reason, abnormal=body.abnormal,
+        )
+        response_version = target or version
+        return _operation("abnormal", service, response_version, rollback=rollback, alert=alert)
+    except ModelLifecycleError as exc:
+        raise _error(exc) from exc
+
+
 @router.post("/{model_id}/abnormal", response_model=LifecycleOperationResponse)
 def abnormal_model(model_id: str, request: Request, body: AbnormalRequest | None = None,
                    session: Session = Depends(get_session)):
+    """Compatibility form retained for clients that already have a version id."""
     service = _service(request, session)
     body = body or AbnormalRequest()
     try:
-        alert, rollback, target = service.mark_abnormal(model_id, body.reason)
+        alert, rollback, target = service.mark_abnormal(
+            model_id, body.reason, abnormal=body.abnormal,
+            no_backup_code="NO_HEALTHY_ROLLBACK_VERSION",
+        )
         # A repeated request can find the existing alert and have no target;
         # return the abnormal source where possible rather than failing a
         # harmless retry.

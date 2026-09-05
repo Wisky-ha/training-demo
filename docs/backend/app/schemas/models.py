@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from ..domain.enums import (
     AlertStatus,
@@ -132,8 +132,26 @@ class RollbackRequest(BaseModel):
 
 
 class AbnormalRequest(BaseModel):
+    """Compatibility payload for the version-id lifecycle endpoint."""
+
     model_config = ConfigDict(extra="forbid")
 
+    abnormal: bool = True
+    reason: str = Field(default="健康检查异常", min_length=1, max_length=2000)
+
+
+class ModelAbnormalRequest(BaseModel):
+    """Type/version based anomaly command used by API and MCP adapters."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    model_type: ModelType
+    model_version: str = Field(
+        min_length=1,
+        max_length=100,
+        validation_alias=AliasChoices("model_version", "version", "model_version_id"),
+    )
+    abnormal: bool = True
     reason: str = Field(default="健康检查异常", min_length=1, max_length=2000)
 
 
@@ -176,7 +194,7 @@ class LifecycleOperationResponse(BaseModel):
 
 
 __all__ = [
-    "AbnormalRequest", "LifecycleOperationResponse", "ModelAlertResponse",
+    "AbnormalRequest", "LifecycleOperationResponse", "ModelAbnormalRequest", "ModelAlertResponse",
     "ModelSaveRequest", "ModelVersionResponse", "PublishRequest",
     "RollbackRequest", "RollbackResponse",
 ]

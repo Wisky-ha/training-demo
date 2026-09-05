@@ -23,6 +23,7 @@ from .scripts import (
 from .models import (
     AbnormalRequest,
     LifecycleOperationResponse,
+    ModelAbnormalRequest,
     ModelAlertResponse,
     ModelSaveRequest,
     ModelVersionResponse,
@@ -45,6 +46,7 @@ __all__ = [
     "PreprocessingTransformResponse",
     "AbnormalRequest",
     "LifecycleOperationResponse",
+    "ModelAbnormalRequest",
     "ModelAlertResponse",
     "ModelSaveRequest",
     "ModelVersionResponse",

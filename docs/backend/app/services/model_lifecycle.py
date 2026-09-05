@@ -45,9 +45,14 @@ class ModelNotFoundError(ModelLifecycleError):
         super().__init__(message, "MODEL_NOT_FOUND")
 
 
+class ModelVersionNotFoundError(ModelLifecycleError):
+    def __init__(self, message: str = "模型版本不存在"):
+        super().__init__(message, "MODEL_VERSION_NOT_FOUND")
+
+
 class NoHealthyRollbackError(ModelLifecycleError):
-    def __init__(self, message: str, **details: Any):
-        super().__init__(message, "NO_HEALTHY_ROLLBACK_VERSION", **details)
+    def __init__(self, message: str, *, code: str = "NO_HEALTHY_BACKUP", **details: Any):
+        super().__init__(message, code, **details)
 
 
 class ModelLifecycleService:
@@ -222,6 +227,17 @@ class ModelLifecycleService:
     def _make_current(self, record: ModelTypeORM, target: ModelVersionORM) -> None:
         if target.health_status is not HealthStatus.HEALTHY:
             raise ModelLifecycleError("异常模型不能成为当前有效版本", "MODEL_HEALTH_INVALID")
+        # The system baseline is the only READY version that may become the
+        # effective pointer. It has no user artifact or publication record,
+        # but is the documented first-version failover target.
+        if target.is_baseline:
+            if target.status is not ModelVersionStatus.READY:
+                raise ModelLifecycleError("系统基线状态无效", "MODEL_BASELINE_INVALID")
+            self._clear_current(record)
+            target.is_current = True
+            record.current_version_id = target.id
+            self.session.flush()
+            return
         if target.status not in {ModelVersionStatus.PUBLISHED, ModelVersionStatus.RETIRED}:
             raise ModelLifecycleError("目标模型必须是已发布版本", "MODEL_STATE_INVALID")
         self._clear_current(record)
@@ -247,15 +263,45 @@ class ModelLifecycleService:
         record.alert_status = AlertStatus.RESOLVED
 
     def _published_healthy_candidates(self, model_type: ModelType, exclude_id: str) -> list[ModelVersionORM]:
-        # RETIRED is a historical production version: it was published and is
-        # deliberately retained as a rollback backup, so it remains eligible.
-        return list(self.session.scalars(select(ModelVersionORM).where(
+        """Return only backups that are actually usable for production.
+
+        A published/healthy flag is not enough: a deleted artifact or an
+        incomplete input contract must never become the new current pointer.
+        Legacy metadata-only rows are retained for backwards compatibility
+        with the original lifecycle API; every artifact-backed row is checked
+        strictly using the same validators as publication.
+        """
+        candidates = self.session.scalars(select(ModelVersionORM).where(
             ModelVersionORM.model_type == model_type,
             ModelVersionORM.id != exclude_id,
+            ModelVersionORM.is_baseline.is_(False),
             ModelVersionORM.health_status == HealthStatus.HEALTHY,
             ModelVersionORM.status.in_([ModelVersionStatus.PUBLISHED, ModelVersionStatus.RETIRED]),
             ModelVersionORM.published_at.is_not(None),
-        ).order_by(ModelVersionORM.published_at.desc(), ModelVersionORM.created_at.desc(), ModelVersionORM.id.desc())).all())
+        ).order_by(
+            ModelVersionORM.published_at.desc(),
+            ModelVersionORM.created_at.desc(),
+            ModelVersionORM.id.desc(),
+        )).all()
+        usable: list[ModelVersionORM] = []
+        for candidate in candidates:
+            # ``legacy/`` rows are the pre-artifact compatibility format. A
+            # managed model must satisfy all artifact/schema checks instead.
+            if (not candidate.model_artifact_id
+                    and candidate.model_path.startswith(("legacy/", "models/"))):
+                usable.append(candidate)
+                continue
+            # New storage paths must be backed by a managed artifact. The
+            # publication compatibility path above is limited to the two
+            # metadata-only path conventions used by older integrations.
+            if not candidate.model_artifact_id:
+                continue
+            try:
+                self._validate_publish_candidate(candidate)
+            except ModelLifecycleError:
+                continue
+            usable.append(candidate)
+        return usable
 
     def _validate_model_artifact(self, version: ModelVersionORM) -> None:
         """Verify the persisted artifact before changing any lifecycle state."""
@@ -511,7 +557,33 @@ class ModelLifecycleService:
                 raise ModelLifecycleError("回滚并发冲突，请重试", "MODEL_LIFECYCLE_CONFLICT") from exc
             return rollback, target
 
-    def mark_abnormal(self, version_id: str, reason: str) -> tuple[ModelAlertORM, RollbackRecordORM | None, ModelVersionORM | None]:
+    def _resolve_model_version(self, model_type: ModelType, model_version: str) -> ModelVersionORM:
+        """Resolve a type-scoped version label (or immutable id) safely."""
+        self._model_type(model_type)
+        version = self.session.scalar(select(ModelVersionORM).where(
+            ModelVersionORM.model_type == model_type,
+            (ModelVersionORM.id == model_version) | (ModelVersionORM.version == model_version),
+        ))
+        if version is None:
+            raise ModelVersionNotFoundError()
+        return version
+
+    def mark_abnormal(
+        self,
+        version_id: str,
+        reason: str,
+        *,
+        abnormal: bool = True,
+        no_backup_code: str = "NO_HEALTHY_BACKUP",
+    ) -> tuple[ModelAlertORM | None, RollbackRecordORM | None, ModelVersionORM | None]:
+        """Mark one version unhealthy and atomically fail over its model type.
+
+        ``abnormal=False`` is deliberately a no-op with respect to alert
+        state. Alert resolution belongs exclusively to successful publication.
+        ``no_backup_code`` only preserves the response code of the legacy
+        version-id route; the type/version endpoint always uses
+        ``NO_HEALTHY_BACKUP``.
+        """
         version = self.get(version_id)
         if version is None:
             raise ModelNotFoundError()
@@ -522,16 +594,25 @@ class ModelLifecycleService:
         with self._lock_for(version.model_type):
             record = self._lock_type(version.model_type)
             current = self._current(record, include_unhealthy=True)
+
+            # Explicit recovery requests never resolve a persistent alert and
+            # never alter the current pointer.  This is also idempotent.
+            if not abnormal:
+                return self._active_alert(version.model_type), None, current or version
+
+            # A retry after a committed anomaly must not create another alert
+            # or rollback record.  The active alert remains the source of truth.
             if version.status is ModelVersionStatus.ABNORMAL and version.health_status is HealthStatus.ABNORMAL:
-                alert = self._active_alert(version.model_type)
-                return alert, None, self._current(record)
+                return self._active_alert(version.model_type), None, current or version
+
             now = self._now()
-            # A historical anomaly is still recorded, but must not disturb a
-            # healthy production pointer.  This is important when monitoring
-            # a retired version or a published canary.
             if current is None or current.id != version.id:
-                if version.status not in {ModelVersionStatus.PUBLISHED, ModelVersionStatus.RETIRED,
-                                           ModelVersionStatus.READY}:
+                # A historical anomaly is recorded but never changes the
+                # production pointer (including a READY canary).
+                if version.status not in {
+                    ModelVersionStatus.PUBLISHED, ModelVersionStatus.RETIRED,
+                    ModelVersionStatus.READY,
+                }:
                     raise ModelLifecycleError("该版本状态不可标记异常", "ABNORMAL_STATE_INVALID")
                 version.health_status = HealthStatus.ABNORMAL
                 version.status = ModelVersionStatus.ABNORMAL
@@ -548,13 +629,30 @@ class ModelLifecycleService:
                     alert.model_version_id = version.id
                     alert.reason = reason
                     alert.rollback_from = version.id
-                    alert.rollback_to = current.id if current else None
+                    alert.rollback_to=current.id if current else None
                     alert.acknowledged_at = None
                 record.alert_status = AlertStatus.ACTIVE
                 self.session.commit()
-                return alert, None, current
+                return alert, None, current or version
+
             if current.status is not ModelVersionStatus.PUBLISHED:
                 raise ModelLifecycleError("只有当前已发布模型才能标记异常", "ABNORMAL_STATE_INVALID")
+
+            # Validate all possible targets before changing the pointer. This
+            # keeps a failed failover from leaving a half-updated transaction.
+            candidates = self._published_healthy_candidates(version.model_type, version.id)
+            target = candidates[0] if candidates else None
+            # A metadata-only legacy row predates the baseline fallback
+            # contract. Keep that compatibility route's old no-backup result;
+            # artifact-backed versions use the immutable v0-baseline fallback.
+            if target is None and not version.model_path.startswith("legacy/"):
+                try:
+                    baseline = self.baselines.get_baseline(version.model_type)
+                except Exception:
+                    baseline = None
+                if baseline is not None and baseline.id != version.id and baseline.health_status is HealthStatus.HEALTHY:
+                    target = baseline
+
             version.health_status = HealthStatus.ABNORMAL
             version.status = ModelVersionStatus.ABNORMAL
             self._clear_current(record)
@@ -574,8 +672,6 @@ class ModelLifecycleService:
                 alert.rollback_to = None
                 alert.acknowledged_at = None
             record.alert_status = AlertStatus.ACTIVE
-            candidates = self._published_healthy_candidates(version.model_type, version.id)
-            target = candidates[0] if candidates else None
             rollback = RollbackRecordORM(
                 model_type=version.model_type, rollback_from=version.id,
                 rollback_to=target.id if target else None, alert=alert,
@@ -594,8 +690,24 @@ class ModelLifecycleService:
             self.session.commit()
             raise NoHealthyRollbackError(
                 "当前模型异常，未找到健康且已发布的回滚版本；告警仍保持 ACTIVE",
-                alert_id=alert.id, rollback_record_id=rollback.id,
+                code=no_backup_code, alert_id=alert.id, rollback_record_id=rollback.id,
             )
+
+    def mark_model_abnormal(
+        self,
+        model_type: ModelType | str,
+        model_version: str,
+        *,
+        abnormal: bool = True,
+        reason: str = "健康检查异常",
+    ) -> tuple[ModelAlertORM | None, RollbackRecordORM | None, ModelVersionORM | None]:
+        """Type/version service boundary used by API and external adapters."""
+        try:
+            code = model_type if isinstance(model_type, ModelType) else ModelType(model_type)
+        except (TypeError, ValueError) as exc:
+            raise ModelLifecycleError("模型类型无效", "MODEL_TYPE_INVALID") from exc
+        version = self._resolve_model_version(code, model_version)
+        return self.mark_abnormal(version.id, reason, abnormal=abnormal)
 
     def alerts(self, *, model_type: ModelType | None = None,
                active_only: bool = False) -> list[ModelAlertORM]:
@@ -624,7 +736,6 @@ class ModelLifecycleService:
     publish_model = publish
     offline = retire
     unpublish = retire
-    mark_model_abnormal = mark_abnormal
     acknowledge = acknowledge_alert
 
     @staticmethod
@@ -697,5 +808,5 @@ ModelVersionService = ModelLifecycleService
 
 __all__ = [
     "ModelLifecycleError", "ModelLifecycleService", "ModelNotFoundError",
-    "NoHealthyRollbackError", "ModelService", "ModelVersionService",
+    "ModelVersionNotFoundError", "NoHealthyRollbackError", "ModelService", "ModelVersionService",
 ]
