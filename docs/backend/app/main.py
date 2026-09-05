@@ -55,7 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         active_settings.ensure_storage_directories()
         initialize_database(engine=engine)
         with session_factory() as session:
-            ModelBaselineService(session).initialize_baselines()
+            ModelBaselineService(session, settings=active_settings).initialize_baselines()
         try:
             yield
         finally:

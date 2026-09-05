@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import copy
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
@@ -305,7 +306,69 @@ class PreprocessingService:
             return instance
 
     @staticmethod
+    def _ordered_partitions(
+        frame: pd.DataFrame, dataset: DatasetORM
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Sort raw rows and return the fixed train/test partitions.
+
+        Preprocessing is deliberately fitted after this boundary.  Keeping the
+        partitioning here also makes the standalone preprocessing endpoint use
+        exactly the same 80/20 rule as training.
+        """
+        if dataset.time_column not in frame.columns:
+            raise PreprocessingError("训练数据缺少时间列", "SPLIT_TIME_COLUMN_MISSING")
+        parsed = DatasetService._parse_datetimes(frame[dataset.time_column])
+        if parsed.isna().any():
+            raise PreprocessingError("时间列存在无法解析的值", "SPLIT_TIME_PARSE_FAILED")
+        if parsed.duplicated().any():
+            raise PreprocessingError("时间列包含重复值", "SPLIT_TIME_DUPLICATE")
+        ordered = frame.copy(deep=True)
+        ordered["__preprocessing_time"] = parsed
+        ordered = ordered.sort_values("__preprocessing_time", kind="mergesort").reset_index(drop=True)
+        ordered = ordered.drop(columns=["__preprocessing_time"])
+        train_count = len(ordered) * 4 // 5
+        test_count = len(ordered) - train_count
+        if train_count < 1 or test_count < 1:
+            raise PreprocessingError(
+                "训练集和测试集都必须非空", "SPLIT_DATASET_TOO_SMALL"
+            )
+        return ordered.iloc[:train_count].copy(), ordered.iloc[train_count:].copy()
+
+    @staticmethod
+    def _execute_partitions(
+        instance: Any,
+        train_frame: pd.DataFrame,
+        test_frame: pd.DataFrame,
+        config: dict[str, Any],
+    ) -> pd.DataFrame:
+        try:
+            fitted = instance.fit(train_frame.copy(deep=True), config)
+        except Exception as exc:
+            raise PreprocessingError(f"预处理 fit 失败：{exc}", "PREPROCESS_FIT_FAILED") from exc
+        if fitted is not instance:
+            raise PreprocessingError("Preprocessor.fit 必须返回 self", "PREPROCESS_FIT_RETURN_INVALID")
+
+        outputs: list[pd.DataFrame] = []
+        for partition in (train_frame, test_frame):
+            try:
+                output = instance.transform(partition.copy(deep=True), config)
+            except Exception as exc:
+                raise PreprocessingError(f"预处理 transform 失败：{exc}", "PREPROCESS_TRANSFORM_FAILED") from exc
+            if not isinstance(output, pd.DataFrame):
+                raise PreprocessingError(
+                    "Preprocessor.transform 必须返回 pandas.DataFrame",
+                    "PREPROCESS_RESULT_NOT_DATAFRAME",
+                )
+            outputs.append(output.copy(deep=True))
+        if list(outputs[0].columns) != list(outputs[1].columns):
+            raise PreprocessingError(
+                "训练集和测试集预处理结果字段不一致", "PREPROCESS_FIELDS_INVALID"
+            )
+        return pd.concat(outputs, ignore_index=True)
+
+    @staticmethod
     def _execute(instance: Any, frame: pd.DataFrame, config: dict[str, Any]) -> pd.DataFrame:
+        """Execute one already-selected frame without changing its contract."""
         try:
             fitted = instance.fit(frame.copy(deep=True), config)
         except Exception as exc:
@@ -341,8 +404,15 @@ class PreprocessingService:
         # Infinite values are never valid training input.  Ordinary NaN values
         # remain possible for a later, explicitly configured imputer.
         for column in columns:
-            numeric = pd.to_numeric(output[column], errors="coerce")
-            if numeric.notna().any() and not pd.Series(numeric.dropna()).map(lambda value: pd.notna(value) and value != float("inf") and value != float("-inf")).all():
+            if column == dataset.time_column:
+                continue
+            values = output[column]
+            numeric = pd.to_numeric(values, errors="coerce")
+            # Missing values may be handled by a later configured imputer, but
+            # a non-null value that cannot become numeric is always invalid.
+            unconvertible = values.notna() & numeric.isna()
+            nonfinite = numeric.notna() & ~numeric.map(lambda value: pd.notna(value) and value != float("inf") and value != float("-inf"))
+            if bool(unconvertible.any()) or bool(nonfinite.any()):
                 raise PreprocessingError(
                     f"预处理结果字段包含无法使用的数值：{column}", "PREPROCESS_VALUES_INVALID"
                 )
@@ -403,7 +473,10 @@ class PreprocessingService:
                 if script is None:
                     raise PreprocessingError("预处理脚本不存在", "SCRIPT_NOT_FOUND")
                 instance = self._instantiate(script)
-                output = self._execute(instance, frame, dict(task.config or {}))
+                train_frame, test_frame = self._ordered_partitions(frame, dataset)
+                output = self._execute_partitions(
+                    instance, train_frame, test_frame, dict(task.config or {})
+                )
                 task.logs = [*task.logs, f"已执行脚本 {script.name} {script.version}"]
                 self._validate_output(output, frame, dataset)
                 # Keep the fitted object (fit is intentionally called exactly
@@ -416,6 +489,7 @@ class PreprocessingService:
                 task.preprocessor_path = artifact.relative_path
                 task.preprocessor_state = {
                     "fitted": True,
+                    "config": copy.deepcopy(dict(task.config or {})),
                     "artifact_type": ArtifactType.PREPROCESSOR.value,
                     "relative_path": artifact.relative_path,
                     "size_bytes": artifact.size_bytes,

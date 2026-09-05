@@ -70,7 +70,7 @@ class ModelLifecycleService:
         self.session = session
         self.settings = settings or get_settings()
         self.storage = FileStorageService(self.settings.file_storage_root, session=session)
-        self.baselines = ModelBaselineService(session)
+        self.baselines = ModelBaselineService(session, settings=self.settings)
 
     @classmethod
     def _lock_for(cls, model_type: ModelType) -> RLock:
@@ -309,11 +309,15 @@ class ModelLifecycleService:
         if not version.model_artifact_id:
             raise ModelLifecycleError("模型文件关联不存在", "MODEL_ARTIFACT_NOT_FOUND")
         artifact = self.session.get(FileArtifactORM, version.model_artifact_id)
-        if (artifact is None or artifact.artifact_type != ArtifactType.MODEL.value
+        expected_type = ArtifactType.BASELINE.value if version.is_baseline else ArtifactType.MODEL.value
+        if (artifact is None or artifact.artifact_type != expected_type
                 or artifact.artifact_id != version.id):
             raise ModelLifecycleError("模型文件关联不一致", "MODEL_ARTIFACT_INVALID")
         try:
-            raw = self.storage.read_model(version.id)
+            raw = self.storage.read(
+                ArtifactType.BASELINE if version.is_baseline else ArtifactType.MODEL,
+                version.id,
+            )
         except (ArtifactNotFoundError, OSError) as exc:
             raise ModelLifecycleError("模型文件不存在", "MODEL_ARTIFACT_NOT_FOUND") from exc
         if not raw:
@@ -393,7 +397,8 @@ class ModelLifecycleService:
                 not all(isinstance(item, str) and item for item in required) or
                 not isinstance(types, dict)):
             raise ModelLifecycleError("输入字段规范不完整", "MODEL_INPUT_SCHEMA_INVALID")
-        if (not version.time_column or not version.target_column or not version.feature_columns or
+        if (not version.time_column or not version.target_column or
+                (not version.is_baseline and not version.feature_columns) or
                 not all(isinstance(item, str) and item for item in version.feature_columns)):
             raise ModelLifecycleError("输入字段规范不完整", "MODEL_INPUT_SCHEMA_INVALID")
         expected_required = [version.time_column, *version.feature_columns]
@@ -413,8 +418,13 @@ class ModelLifecycleService:
         one) is always checked strictly.
         """
 
-        if not version.model_artifact_id or version.model_path.startswith("legacy/"):
+        if version.model_path.startswith(("legacy/", "models/")) and (
+                not version.model_artifact_id or
+                (not version.input_schema and not version.time_column and not version.feature_columns)
+        ):
             return
+        if not version.model_artifact_id:
+            raise ModelLifecycleError("模型文件关联不存在", "MODEL_ARTIFACT_NOT_FOUND")
         self._validate_model_artifact(version)
         self._validate_preprocessor(version)
         self._validate_input_schema(version)
@@ -534,6 +544,9 @@ class ModelLifecycleService:
             if target.status not in {ModelVersionStatus.PUBLISHED, ModelVersionStatus.RETIRED} or \
                     target.health_status is not HealthStatus.HEALTHY or target.published_at is None:
                 raise ModelLifecycleError("目标必须是健康且已发布的历史版本", "ROLLBACK_TARGET_INVALID")
+            # Manual rollback must have the same artifact and input-contract
+            # guarantees as publication and automatic failover.
+            self._validate_publish_candidate(target)
             now = self._now()
             source_id = source.id
             cleared = self._clear_current(record)
@@ -648,10 +661,13 @@ class ModelLifecycleService:
             if target is None and not version.model_path.startswith("legacy/"):
                 try:
                     baseline = self.baselines.get_baseline(version.model_type)
+                    if baseline.id != version.id and baseline.health_status is HealthStatus.HEALTHY:
+                        self._validate_publish_candidate(baseline)
+                        target = baseline
+                except ModelLifecycleError:
+                    target = None
                 except Exception:
                     baseline = None
-                if baseline is not None and baseline.id != version.id and baseline.health_status is HealthStatus.HEALTHY:
-                    target = baseline
 
             version.health_status = HealthStatus.ABNORMAL
             version.status = ModelVersionStatus.ABNORMAL

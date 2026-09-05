@@ -84,7 +84,7 @@ class TrainingJobService:
         self.settings = settings or get_settings()
         self.repository = TrainingJobRepository(session)
         self.version_repository = ModelVersionRepository(session)
-        self.baseline_service = ModelBaselineService(session)
+        self.baseline_service = ModelBaselineService(session, settings=self.settings)
         self.storage = FileStorageService(self.settings.file_storage_root, session=session)
 
     @classmethod
@@ -315,13 +315,19 @@ class TrainingJobService:
             self.session.commit()
         return job
 
-    def _stage(self, job: TrainingJobORM, stage: str, message: str) -> None:
+    def _stage(
+        self,
+        job: TrainingJobORM,
+        stage: str,
+        message: str,
+        status: TrainingJobStatus = TrainingJobStatus.RUNNING,
+    ) -> None:
         if self._cancelled(job.id) or job.status is TrainingJobStatus.CANCELLED:
             raise _CancellationRequested
         now = self._now()
         if job.started_at is None:
             job.started_at = now
-        job.status = TrainingJobStatus.RUNNING
+        job.status = status
         job.progress_stage = stage
         job.current_stage = stage
         job.stage_started_at = now
@@ -389,9 +395,9 @@ class TrainingJobService:
         self.session.commit()
 
     @staticmethod
-    def _ordered_training_data(
+    def _ordered_partitions(
         frame: pd.DataFrame, dataset: DatasetORM
-    ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, int, int, pd.Series]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
         if dataset.time_column not in frame.columns or dataset.target_column not in frame.columns:
             raise TrainingJobError("训练数据缺少时间列或目标列", "TRAINING_DATA_SCHEMA_INVALID")
         parsed = DatasetService._parse_datetimes(frame[dataset.time_column])
@@ -407,15 +413,32 @@ class TrainingJobService:
         test_count = len(ordered) - train_count
         if train_count < 1 or test_count < 1:
             raise TrainingJobError("训练集和测试集都必须非空", "SPLIT_DATASET_TOO_SMALL")
-        features = [str(column) for column in ordered.columns if column not in {dataset.time_column, dataset.target_column}]
+        return ordered.iloc[:train_count].copy(), ordered.iloc[train_count:].copy(), ordered_times
+
+    @staticmethod
+    def _partition_training_data(
+        train: pd.DataFrame, test: pd.DataFrame, dataset: DatasetORM
+    ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+        features = [str(column) for column in train.columns if column not in {dataset.time_column, dataset.target_column}]
         if not features:
             raise TrainingJobError("训练数据没有特征字段", "TRAINING_FEATURES_EMPTY")
-        target = pd.to_numeric(ordered[dataset.target_column], errors="coerce")
-        if target.isna().any() or not np.isfinite(target.to_numpy(dtype=float)).all():
-            raise TrainingJobError("训练数据目标列包含无效值", "TRAINING_TARGET_INVALID")
-        train = ordered.iloc[:train_count]
-        test = ordered.iloc[train_count:]
-        return train[features].copy(), target.iloc[:train_count].copy(), test[features].copy(), target.iloc[train_count:].copy(), train_count, test_count, ordered_times
+        target_train = pd.to_numeric(train[dataset.target_column], errors="coerce")
+        target_test = pd.to_numeric(test[dataset.target_column], errors="coerce")
+        for target in (target_train, target_test):
+            if target.isna().any() or not np.isfinite(target.to_numpy(dtype=float)).all():
+                raise TrainingJobError("训练数据目标列包含无效值", "TRAINING_TARGET_INVALID")
+        return (
+            train[features].copy(), target_train.copy(),
+            test[features].copy(), target_test.copy(),
+        )
+
+    @staticmethod
+    def _ordered_training_data(
+        frame: pd.DataFrame, dataset: DatasetORM
+    ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, int, int, pd.Series]:
+        train, test, ordered_times = TrainingJobService._ordered_partitions(frame, dataset)
+        X_train, y_train, X_test, y_test = TrainingJobService._partition_training_data(train, test, dataset)
+        return X_train, y_train, X_test, y_test, len(train), len(test), ordered_times
 
     @staticmethod
     def _prediction(model: Any, X_test: pd.DataFrame, expected: int) -> np.ndarray:
@@ -690,10 +713,19 @@ class TrainingJobService:
                 raise TrainingJobError("训练数据集或划分不存在", "DATASET_SPLIT_NOT_FOUND")
             task = self.session.get(PreprocessingTaskORM, job.preprocessing_task_id) if job.preprocessing_task_id else None
             preprocessing = PreprocessingService(self.session, settings=self.settings)
-            frame = preprocessing._dataset_frame(dataset)
+            raw_frame = preprocessing._dataset_frame(dataset)
+            self._stage(job, "数据集划分", "SPLITTING：按时间顺序执行 80/20 划分", TrainingJobStatus.SPLITTING)
+            raw_train, raw_test, ordered_times = self._ordered_partitions(raw_frame, dataset)
+            self._stage(job, "预处理", "PREPROCESSING：使用已保存状态处理训练集和测试集", TrainingJobStatus.PREPROCESSING)
+            train_frame, test_frame = raw_train, raw_test
             if task and task.preprocess_used:
-                frame = preprocessing.transform_with_saved_state(task, frame, config or job.config)
-            X_train, y_train, X_test, y_test, train_count, test_count, ordered_times = self._ordered_training_data(frame, dataset)
+                saved_config = config or job.config
+                train_frame = preprocessing.transform_with_saved_state(task, raw_train, saved_config)
+                test_frame = preprocessing.transform_with_saved_state(task, raw_test, saved_config)
+            X_train, y_train, X_test, y_test = self._partition_training_data(
+                train_frame, test_frame, dataset
+            )
+            train_count, test_count = len(y_train), len(y_test)
             job.train_row_count = train_count
             job.test_row_count = test_count
             job.train_time_start = ordered_times.iloc[0].to_pydatetime()
@@ -703,11 +735,11 @@ class TrainingJobService:
             self.session.commit()
             self._check_cancel(job)
 
-            self._stage(job, "加载训练脚本", "RUNNING：加载训练脚本")
+            self._stage(job, "加载训练脚本", "TRAINING：加载训练脚本", TrainingJobStatus.TRAINING)
             train_script = self.session.get(ScriptORM, job.train_script_id)
             if train_script is None:
                 raise TrainingJobError("训练脚本不存在", "SCRIPT_NOT_FOUND")
-            self._stage(job, "执行训练", "RUNNING：执行训练")
+            self._stage(job, "执行训练", "TRAINING：执行训练", TrainingJobStatus.TRAINING)
             executor = TrainingScriptExecutor()
             try:
                 result = executor.execute(
@@ -729,14 +761,13 @@ class TrainingJobService:
             if not result.success or result.model is None:
                 raise TrainingJobError(result.error or "训练脚本执行失败", result.error_code or "TRAIN_EXECUTION_FAILED")
             predictions = self._prediction(result.model, X_test, len(y_test))
-            self._stage(job, "保存模型", "RUNNING：保存模型草稿")
+            self._stage(job, "进入评估", "EVALUATING：计算候选模型和基线指标", TrainingJobStatus.EVALUATING)
             version, evaluation, model_path = self._save_version(
-                job, dataset, train_script, task, frame, X_train, X_test, y_train,
+                job, dataset, train_script, task, raw_frame, X_train, X_test, y_train,
                 y_test, ordered_times, result, predictions,
             )
             artifact_id = version.id
             job.model_version_id = version.id
-            self._stage(job, "进入评估", "RUNNING：进入评估")
             self._check_cancel(job)
             # A candidate is transiently DRAFT while its artifact and
             # evaluation are being assembled.  Only a fully successful

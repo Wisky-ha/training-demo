@@ -8,14 +8,19 @@ users save or publish a model.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from io import BytesIO
 from threading import RLock
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+import joblib
+
+from ..core.config import Settings, get_settings
 from ..db.models import ModelTypeORM, ModelVersionORM
 from ..db.repositories import ModelTypeRepository, ModelVersionRepository
 from ..domain.enums import HealthStatus, ModelType, ModelVersionStatus
+from ..storage import ArtifactType, FileStorageService
 
 
 BASELINE_VERSION = "v0-baseline"
@@ -35,15 +40,52 @@ class ModelBaselineError(ValueError):
         self.code = code
 
 
+class _ZeroBaselineModel:
+    """Deterministic, artifact-backed fallback for a model family."""
+
+    def predict(self, values):
+        return [0.0] * len(values)
+
+
 class ModelBaselineService:
-    """Provision one immutable baseline for every supported model family."""
+    """Provision one immutable, predictable baseline for every model family."""
 
     _initialization_lock = RLock()
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, settings: Settings | None = None) -> None:
         self.session = session
+        self.settings = settings or get_settings()
         self.model_types = ModelTypeRepository(session)
         self.versions = ModelVersionRepository(session)
+        self.storage = FileStorageService(self.settings.file_storage_root, session=session)
+
+    @staticmethod
+    def _input_schema() -> dict[str, object]:
+        # A baseline has no learned feature contract.  It accepts the common
+        # timestamp and ignores caller feature columns while returning its
+        # deterministic fallback value.
+        return {
+            "columns": ["time", "target"],
+            "required_columns": ["time"],
+            "column_types": {"time": "datetime", "target": "number"},
+            "time_column": "time",
+            "time_format": None,
+            "target_column": "target",
+            "extra_columns": "ignore",
+        }
+
+    def _ensure_artifact(self, baseline: ModelVersionORM) -> None:
+        if baseline.model_artifact_id:
+            return
+        buffer = BytesIO()
+        joblib.dump(_ZeroBaselineModel(), buffer)
+        artifact = self.storage.save(ArtifactType.BASELINE, baseline.id, buffer.getvalue())
+        baseline.model_path = artifact.relative_path
+        baseline.model_artifact_id = artifact.id
+        baseline.input_schema = self._input_schema()
+        baseline.time_column = "time"
+        baseline.feature_columns = []
+        baseline.target_column = "target"
 
     @staticmethod
     def _now() -> datetime:
@@ -90,19 +132,20 @@ class ModelBaselineService:
                                 f"模型类型 {code.value} 的 v0-baseline 已被用户版本占用",
                                 "BASELINE_VERSION_CONFLICT",
                             )
+                        self._ensure_artifact(existing)
                         result.append(existing)
                         continue
-                    result.append(
-                        self.versions.create(
-                            model_type=code,
-                            version=BASELINE_VERSION,
-                            model_path=f"system/baselines/{code.value}/{BASELINE_VERSION}.joblib",
-                            status=ModelVersionStatus.READY,
-                            health_status=HealthStatus.HEALTHY,
-                            is_baseline=True,
-                            is_current=False,
-                        )
+                    baseline = self.versions.create(
+                        model_type=code,
+                        version=BASELINE_VERSION,
+                        model_path=f"system/baselines/{code.value}/{BASELINE_VERSION}.joblib",
+                        status=ModelVersionStatus.READY,
+                        health_status=HealthStatus.HEALTHY,
+                        is_baseline=True,
+                        is_current=False,
                     )
+                    self._ensure_artifact(baseline)
+                    result.append(baseline)
                 self.session.commit()
                 return result
             except ModelBaselineError:

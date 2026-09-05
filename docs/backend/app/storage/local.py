@@ -42,6 +42,7 @@ class ArtifactType(str, Enum):
     PREPROCESSOR = "preprocessor"
     SCRIPT = "script"
     DATASET = "dataset"
+    BASELINE = "baseline"
 
     # Descriptive aliases keep the API readable without adding new values.
     MODEL_FILE = "model"
@@ -117,6 +118,7 @@ class FileStorageService:
         ArtifactType.PREPROCESSOR: ".state",
         ArtifactType.SCRIPT: ".py",
         ArtifactType.DATASET: ".csv",
+        ArtifactType.BASELINE: ".bin",
     }
 
     def __init__(

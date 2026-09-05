@@ -99,7 +99,9 @@ class MCPModelService:
             raise MCPServiceError("模型加载失败", "MODEL_LOAD_FAILED", cause_code=exc.code) from exc
 
         try:
-            raw = self.storage.read_model(version.id)
+            raw = self.storage.read(
+                "baseline" if version.is_baseline else "model", version.id
+            )
             try:
                 model = cloudpickle.load(BytesIO(raw))
             except Exception:
@@ -152,21 +154,31 @@ class MCPModelService:
 
     def _prediction_values(self, raw: Any, expected_count: int) -> list[Any]:
         if isinstance(raw, pd.DataFrame):
-            values: Any = raw.to_numpy().tolist()
+            array = raw.to_numpy()
         elif isinstance(raw, (pd.Series, pd.Index, np.ndarray, tuple, list)):
-            values = raw.tolist() if hasattr(raw, "tolist") else list(raw)
+            array = np.asarray(raw.tolist() if hasattr(raw, "tolist") else list(raw))
         else:
-            values = [raw]
-        if not isinstance(values, list):
-            values = [values]
-        if len(values) != expected_count:
+            array = np.asarray([raw])
+        if array.ndim != 1:
+            raise MCPServiceError(
+                "模型必须返回一维预测结果",
+                "PREDICTION_FAILED",
+                dimensions=int(array.ndim),
+            )
+        if len(array) != expected_count:
             raise MCPServiceError(
                 "模型返回的预测数量与输入行数不一致",
                 "PREDICTION_FAILED",
                 expected_count=expected_count,
-                actual_count=len(values),
+                actual_count=len(array),
             )
-        return self._json_safe(values)
+        try:
+            numeric = np.asarray(array, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise MCPServiceError("模型预测包含非数值结果", "PREDICTION_FAILED") from exc
+        if not np.isfinite(numeric).all():
+            raise MCPServiceError("模型预测包含无效数值", "PREDICTION_FAILED")
+        return self._json_safe(array.tolist())
 
     def predict(
         self, model_type: ModelType | str, data: Any, model_version: str | None = None

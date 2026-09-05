@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from ..db.models import ModelTypeORM, ModelVersionORM
 from ..db.repositories import ModelVersionRepository
 from ..domain.enums import HealthStatus, ModelType, ModelVersionStatus
+from .model_baseline import ModelBaselineService
 from .model_lifecycle import ModelLifecycleError, ModelLifecycleService
 
 
@@ -125,11 +126,14 @@ class PredictionInputValidationService:
             # current_version_id was introduced.
             version = self.versions.get_current_production(code)
             if version is None:
-                raise PredictionInputValidationError(
-                    "模型类型没有可用的当前生产版本",
-                    "MODEL_VERSION_UNAVAILABLE",
-                    model_type=code.value,
-                )
+                try:
+                    version = ModelBaselineService(self.session).get_baseline(code)
+                except Exception:
+                    raise PredictionInputValidationError(
+                        "模型类型没有可用的当前生产版本",
+                        "MODEL_VERSION_UNAVAILABLE",
+                        model_type=code.value,
+                    )
         else:
             version = self.session.scalar(select(ModelVersionORM).where(
                 ModelVersionORM.model_type == code,
@@ -144,9 +148,11 @@ class PredictionInputValidationService:
                     model_version=model_version,
                 )
 
-        if (
-            version.is_baseline
-            or version.status is not ModelVersionStatus.PUBLISHED
+        if version.is_baseline:
+            if version.status is not ModelVersionStatus.READY or version.health_status is not HealthStatus.HEALTHY:
+                self._unavailable(version, requested=model_version)
+        elif (
+            version.status is not ModelVersionStatus.PUBLISHED
             or version.health_status is not HealthStatus.HEALTHY
         ):
             self._unavailable(version, requested=model_version)
