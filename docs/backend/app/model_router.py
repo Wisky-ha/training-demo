@@ -41,7 +41,8 @@ def _error(exc: ModelLifecycleError) -> HTTPException:
         response_status = status.HTTP_404_NOT_FOUND
     elif exc.code in {
         "PUBLISH_CONFIRMATION_REQUIRED", "MODEL_ARTIFACT_INVALID",
-        "ABNORMAL_REASON_REQUIRED", "MODEL_TYPE_NOT_FOUND",
+        "MODEL_ARTIFACT_NOT_FOUND", "PREPROCESSOR_STATE_INVALID",
+        "MODEL_INPUT_SCHEMA_INVALID", "ABNORMAL_REASON_REQUIRED", "MODEL_TYPE_NOT_FOUND",
     }:
         response_status = status.HTTP_400_BAD_REQUEST
     elif exc.code in {

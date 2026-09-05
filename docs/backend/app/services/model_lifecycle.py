@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from datetime import datetime, timezone
+from io import BytesIO
 from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+import cloudpickle
+import joblib
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..core.config import Settings, get_settings
 from ..db.models import (
+    FileArtifactORM,
     ModelAlertORM,
     ModelTypeORM,
     ModelVersionORM,
@@ -22,7 +27,7 @@ from ..db.models import (
 )
 from ..domain.enums import AlertStatus, HealthStatus, ModelType, ModelVersionStatus, RollbackStatus
 from ..schemas.models import AbnormalRequest, ModelSaveRequest
-from ..storage import ArtifactType, FileStorageService
+from ..storage import ArtifactNotFoundError, ArtifactType, FileStorageService
 from .model_baseline import ModelBaselineService
 
 
@@ -159,7 +164,10 @@ class ModelLifecycleService:
             if not content:
                 raise ModelLifecycleError("模型制品不能为空", "MODEL_ARTIFACT_INVALID")
             artifact = self.storage.save_model(version_id, content)
-        path = artifact.relative_path if artifact else (request.model_path or f"model/{version_id}.joblib")
+        # Preserve an explicitly registered path for legacy metadata-only
+        # integrations.  Training-created artifacts still use the canonical
+        # storage path when no path was supplied.
+        path = request.model_path or (artifact.relative_path if artifact else f"model/{version_id}.joblib")
         try:
             model = ModelVersionORM(
                 id=version_id, model_type=request.model_type, version=version_label,
@@ -249,6 +257,122 @@ class ModelLifecycleService:
             ModelVersionORM.published_at.is_not(None),
         ).order_by(ModelVersionORM.published_at.desc(), ModelVersionORM.created_at.desc(), ModelVersionORM.id.desc())).all())
 
+    def _validate_model_artifact(self, version: ModelVersionORM) -> None:
+        """Verify the persisted artifact before changing any lifecycle state."""
+
+        if not version.model_artifact_id:
+            raise ModelLifecycleError("模型文件关联不存在", "MODEL_ARTIFACT_NOT_FOUND")
+        artifact = self.session.get(FileArtifactORM, version.model_artifact_id)
+        if (artifact is None or artifact.artifact_type != ArtifactType.MODEL.value
+                or artifact.artifact_id != version.id):
+            raise ModelLifecycleError("模型文件关联不一致", "MODEL_ARTIFACT_INVALID")
+        try:
+            raw = self.storage.read_model(version.id)
+        except (ArtifactNotFoundError, OSError) as exc:
+            raise ModelLifecycleError("模型文件不存在", "MODEL_ARTIFACT_NOT_FOUND") from exc
+        if not raw:
+            raise ModelLifecycleError("模型文件为空", "MODEL_ARTIFACT_INVALID")
+        if artifact.relative_path != version.model_path:
+            raise ModelLifecycleError("模型文件路径关联不一致", "MODEL_ARTIFACT_INVALID")
+        if artifact.size_bytes != len(raw) or artifact.checksum_sha256 != hashlib.sha256(raw).hexdigest():
+            raise ModelLifecycleError("模型文件校验失败", "MODEL_ARTIFACT_INVALID")
+        try:
+            # Training currently prefers cloudpickle and older integrations
+            # may use joblib.  Both loaders are deliberately tried without
+            # executing a prediction: publication only establishes that the
+            # persisted model can be restored.
+            try:
+                cloudpickle.load(BytesIO(raw))
+            except Exception:
+                joblib.load(BytesIO(raw))
+        except Exception as exc:
+            raise ModelLifecycleError("模型文件无法加载", "MODEL_ARTIFACT_INVALID") from exc
+
+    def _validate_preprocessor(self, version: ModelVersionORM) -> None:
+        """Verify optional fitted-state metadata belongs to this version."""
+
+        has_metadata = any((version.preprocessor_path, version.preprocessor_artifact_id,
+                            version.preprocessor_state))
+        if not version.preprocess_used:
+            if has_metadata:
+                raise ModelLifecycleError("模型预处理器状态与关联标记不一致", "PREPROCESSOR_STATE_INVALID")
+            return
+        if (not version.preprocessor_path or not version.preprocessor_artifact_id
+                or not isinstance(version.preprocessor_state, dict)):
+            raise ModelLifecycleError("模型缺少完整的预处理器状态", "PREPROCESSOR_STATE_INVALID")
+        state = version.preprocessor_state
+        if state.get("fitted") is not True:
+            raise ModelLifecycleError("预处理器必须是已拟合状态", "PREPROCESSOR_STATE_INVALID")
+        artifact = self.session.get(FileArtifactORM, version.preprocessor_artifact_id)
+        if artifact is None or artifact.artifact_type != ArtifactType.PREPROCESSOR.value:
+            raise ModelLifecycleError("预处理器文件关联不存在", "PREPROCESSOR_STATE_INVALID")
+        if artifact.relative_path != version.preprocessor_path:
+            raise ModelLifecycleError("预处理器文件路径关联不一致", "PREPROCESSOR_STATE_INVALID")
+        try:
+            raw = self.storage.read_preprocessor_state(artifact.artifact_id)
+        except (ArtifactNotFoundError, OSError) as exc:
+            raise ModelLifecycleError("预处理器状态文件不存在", "PREPROCESSOR_STATE_INVALID") from exc
+        if not raw or artifact.size_bytes != len(raw) or artifact.checksum_sha256 != hashlib.sha256(raw).hexdigest():
+            raise ModelLifecycleError("预处理器状态校验失败", "PREPROCESSOR_STATE_INVALID")
+        # Older callers only persisted ``fitted``; when the richer snapshot
+        # metadata is present, every value must still agree with the artifact.
+        if (state.get("relative_path") is not None
+                and state.get("relative_path") != artifact.relative_path) or \
+                (state.get("artifact_type") is not None
+                and state.get("artifact_type") != ArtifactType.PREPROCESSOR.value):
+            raise ModelLifecycleError("预处理器状态与文件关联不一致", "PREPROCESSOR_STATE_INVALID")
+        if (state.get("size_bytes") is not None
+                and state.get("size_bytes") != artifact.size_bytes) or \
+                (state.get("checksum_sha256") is not None
+                and state.get("checksum_sha256") != artifact.checksum_sha256):
+            raise ModelLifecycleError("预处理器状态元数据不一致", "PREPROCESSOR_STATE_INVALID")
+
+    @staticmethod
+    def _validate_input_schema(version: ModelVersionORM) -> None:
+        """Require the complete, name-based prediction input contract."""
+
+        schema = version.input_schema
+        if not isinstance(schema, dict) or not schema:
+            raise ModelLifecycleError("输入字段规范不完整", "MODEL_INPUT_SCHEMA_INVALID")
+        required_keys = {"columns", "required_columns", "column_types", "time_column",
+                         "target_column", "extra_columns"}
+        if not required_keys.issubset(schema):
+            raise ModelLifecycleError("输入字段规范不完整", "MODEL_INPUT_SCHEMA_INVALID")
+        columns = schema.get("columns")
+        required = schema.get("required_columns")
+        types = schema.get("column_types")
+        if (not isinstance(columns, list) or not columns or
+                not all(isinstance(item, str) and item for item in columns) or len(set(columns)) != len(columns) or
+                not isinstance(required, list) or not required or
+                not all(isinstance(item, str) and item for item in required) or
+                not isinstance(types, dict)):
+            raise ModelLifecycleError("输入字段规范不完整", "MODEL_INPUT_SCHEMA_INVALID")
+        if (not version.time_column or not version.target_column or not version.feature_columns or
+                not all(isinstance(item, str) and item for item in version.feature_columns)):
+            raise ModelLifecycleError("输入字段规范不完整", "MODEL_INPUT_SCHEMA_INVALID")
+        expected_required = [version.time_column, *version.feature_columns]
+        if (required != expected_required or schema.get("time_column") != version.time_column or
+                schema.get("target_column") != version.target_column or
+                version.time_column not in columns or version.target_column not in columns or
+                any(item not in columns for item in expected_required) or
+                any(item not in types for item in columns)):
+            raise ModelLifecycleError("输入字段规范与模型元数据不一致", "MODEL_INPUT_SCHEMA_INVALID")
+
+    def _validate_publish_candidate(self, version: ModelVersionORM) -> None:
+        """Run all publication checks before touching the production pointer.
+
+        Metadata-only rows predate artifact-backed model registration and are
+        retained as a compatibility path for the existing lifecycle API.  Any
+        candidate carrying a managed artifact (including a corrupt or missing
+        one) is always checked strictly.
+        """
+
+        if not version.model_artifact_id or version.model_path.startswith("legacy/"):
+            return
+        self._validate_model_artifact(version)
+        self._validate_preprocessor(version)
+        self._validate_input_schema(version)
+
     def publish(self, version_id: str, *, confirmed: bool = False,
                 message: str | None = None, idempotency_key: str | None = None) -> tuple[ModelVersionORM, PublishRecordORM | None]:
         if not confirmed:
@@ -280,6 +404,9 @@ class ModelLifecycleService:
                 raise ModelLifecycleError("只有健康模型才能发布", "MODEL_HEALTH_INVALID")
             if version.status is not ModelVersionStatus.READY:
                 raise ModelLifecycleError("只有就绪模型才能发布", "PUBLISH_STATE_INVALID")
+            # Every check is completed before _clear_current so a failed
+            # publication cannot disturb the existing production version.
+            self._validate_publish_candidate(version)
             now = self._now()
             previous_id = current.id if current else None
             cleared = self._clear_current(record)
