@@ -29,6 +29,7 @@ from .db.session import (
     get_session,
     initialize_database,
 )
+from .audit_router import router as audit_router
 from .datasets.router import router as dataset_router
 from .preprocessing.router import router as preprocessing_router
 from .scripts.router import router as script_router
@@ -102,6 +103,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # makes create_app(Settings(...)) isolated and keeps existing test/deployment
     # overrides working as expected.
     application.dependency_overrides[get_session] = app_session
+    application.include_router(audit_router)
     application.include_router(dataset_router)
     application.include_router(script_router)
     application.include_router(preprocessing_router)

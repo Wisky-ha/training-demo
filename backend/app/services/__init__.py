@@ -1,5 +1,6 @@
 """Application services."""
 
+from .audit_events import AuditEventService
 from .datasets import (
     CSVParseError,
     DatasetService,
@@ -53,6 +54,7 @@ from .scripts import (
 )
 
 __all__ = [
+    "AuditEventService",
     "CSVParseError",
     "DatasetService",
     "ParsedDataset",

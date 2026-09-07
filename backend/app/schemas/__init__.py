@@ -1,5 +1,6 @@
 """API request and response schemas."""
 
+from .audit_events import AuditEventResponse, AuditEventsResponse
 from .dataset_split import DatasetSplitRequest, DatasetSplitResponse, TimeRange
 from .preprocessing import (
     PreprocessingTaskCreate,
@@ -33,6 +34,8 @@ from .models import (
 )
 
 __all__ = [
+    "AuditEventResponse",
+    "AuditEventsResponse",
     "PaginationMeta",
     "PaginatedScriptsResponse",
     "ScriptResponse",

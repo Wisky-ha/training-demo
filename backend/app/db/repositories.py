@@ -7,7 +7,7 @@ import re
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel as PydanticModel
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..domain.enums import (
@@ -35,6 +35,7 @@ from .models import (
     RollbackRecordORM,
     ScriptORM,
     TrainingJobORM,
+    AuditEventORM,
 )
 
 ORMModel = TypeVar("ORMModel")
@@ -170,6 +171,115 @@ class Repository(Generic[ORMModel]):
         self.session.delete(instance)
         self.session.flush()
         return True
+
+
+class AuditEventRepository:
+    """Read-only repository for append-only audit events."""
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    @staticmethod
+    def _text_filter(value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    def _filtered_statement(
+        self,
+        *,
+        from_: Any = None,
+        to: Any = None,
+        model_type: ModelType | None = None,
+        event_type: str | None = None,
+        object_type: str | None = None,
+        result: str | None = None,
+        query: str | None = None,
+    ):
+        statement = select(AuditEventORM)
+        if from_ is not None:
+            statement = statement.where(AuditEventORM.occurred_at >= from_)
+        if to is not None:
+            statement = statement.where(AuditEventORM.occurred_at <= to)
+        if model_type is not None:
+            statement = statement.where(AuditEventORM.model_type == model_type)
+        for column, value in (
+            (AuditEventORM.event_type, event_type),
+            (AuditEventORM.object_type, object_type),
+            (AuditEventORM.result, result),
+        ):
+            normalized = self._text_filter(value)
+            if normalized is not None:
+                statement = statement.where(column == normalized)
+        keyword = self._text_filter(query)
+        if keyword is not None:
+            pattern = f"%{keyword}%"
+            searchable = (
+                AuditEventORM.event_type,
+                AuditEventORM.object_type,
+                AuditEventORM.object_id,
+                AuditEventORM.operator_type,
+                AuditEventORM.operator_id,
+                AuditEventORM.operator_name,
+                AuditEventORM.result,
+                AuditEventORM.message,
+                AuditEventORM.request_id,
+                AuditEventORM.correlation_id,
+                cast(AuditEventORM.event_metadata, Text),
+            )
+            statement = statement.where(or_(*(column.ilike(pattern) for column in searchable)))
+        return statement
+
+    def count(
+        self,
+        *,
+        from_: Any = None,
+        to: Any = None,
+        model_type: ModelType | None = None,
+        event_type: str | None = None,
+        object_type: str | None = None,
+        result: str | None = None,
+        query: str | None = None,
+    ) -> int:
+        statement = self._filtered_statement(
+            from_=from_,
+            to=to,
+            model_type=model_type,
+            event_type=event_type,
+            object_type=object_type,
+            result=result,
+            query=query,
+        ).with_only_columns(func.count(AuditEventORM.event_id))
+        return int(self.session.scalar(statement) or 0)
+
+    def list_page(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        from_: Any = None,
+        to: Any = None,
+        model_type: ModelType | None = None,
+        event_type: str | None = None,
+        object_type: str | None = None,
+        result: str | None = None,
+        query: str | None = None,
+    ) -> tuple[list[AuditEventORM], int]:
+        filters = {
+            "from_": from_,
+            "to": to,
+            "model_type": model_type,
+            "event_type": event_type,
+            "object_type": object_type,
+            "result": result,
+            "query": query,
+        }
+        total = self.count(**filters)
+        statement = self._filtered_statement(**filters).order_by(
+            AuditEventORM.occurred_at.desc(), AuditEventORM.event_id.desc()
+        ).offset((page - 1) * page_size).limit(page_size)
+        return list(self.session.scalars(statement).all()), total
 
 
 class ModelTypeRepository(Repository[ModelTypeORM]):
@@ -390,6 +500,7 @@ class RollbackRepository(Repository[RollbackRecordORM]):
 
 
 # Plural aliases are harmless and make imports read naturally in service code.
+AuditEventsRepository = AuditEventRepository
 ModelTypesRepository = ModelTypeRepository
 ScriptsRepository = ScriptRepository
 DatasetsRepository = DatasetRepository
@@ -404,6 +515,8 @@ RollbackRecordsRepository = RollbackRepository
 
 __all__ = [
     "Repository",
+    "AuditEventRepository",
+    "AuditEventsRepository",
     "ModelTypeRepository",
     "ScriptRepository",
     "DatasetRepository",
