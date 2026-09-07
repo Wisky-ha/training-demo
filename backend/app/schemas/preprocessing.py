@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..domain.enums import ModelType, PreprocessingStage, PreprocessingTaskStatus
+from ..domain.models import ResourceId
 
 
 class PreprocessingTaskCreate(BaseModel):
@@ -20,8 +21,8 @@ class PreprocessingTaskCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model_type: ModelType
-    dataset_id: str = Field(min_length=1, max_length=255)
-    preprocess_script_id: str | None = Field(default=None, max_length=255)
+    dataset_id: ResourceId
+    preprocess_script_id: ResourceId | None = None
     mode: Literal["use", "skip"] | None = None
     # ``skip`` is an ergonomic alias for clients that model the option as a
     # checkbox.  When it is true the service ignores any script ID and never
@@ -45,10 +46,10 @@ class PreprocessingTaskResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: ResourceId
     model_type: ModelType
-    dataset_id: str
-    preprocess_script_id: str | None
+    dataset_id: ResourceId
+    preprocess_script_id: ResourceId | None
     preprocess_used: bool
     preprocess_status: Literal["used", "unused"]
     preprocess_message: str
@@ -81,14 +82,14 @@ class PreprocessingTransformRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    dataset_id: str = Field(min_length=1, max_length=255)
+    dataset_id: ResourceId
     config: dict[str, Any] | None = None
 
 
 class PreprocessingTransformResponse(BaseModel):
     """Small, JSON-safe result for a state-reuse operation."""
 
-    task_id: str
+    task_id: ResourceId
     preprocess_used: bool
     data_source: Literal["raw", "preprocessed"]
     row_count: int

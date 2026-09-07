@@ -52,7 +52,7 @@ def test_workflow_enum_values_match_requirements():
         "ABNORMAL",
         "FAILED",
     }
-    assert {item.value for item in AlertStatus} == {"ACTIVE", "RESOLVED"}
+    assert {item.value for item in AlertStatus} == {"ACTIVE", "ACKNOWLEDGED", "RESOLVED"}
     assert {item.value for item in RollbackStatus} == {
         "PENDING",
         "SUCCEEDED",

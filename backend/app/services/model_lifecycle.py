@@ -191,6 +191,7 @@ class ModelLifecycleService:
                 test_ratio=request.test_ratio, train_data_summary=request.train_data_summary,
                 test_data_summary=request.test_data_summary, metrics=request.metrics,
                 status=request.status,
+                health_status=request.health_status or HealthStatus.UNKNOWN,
             )
             self.session.add(model)
             self.session.flush()
@@ -246,16 +247,21 @@ class ModelLifecycleService:
         record.current_version_id = target.id
         self.session.flush()
 
-    def _active_alert(self, model_type: ModelType) -> ModelAlertORM | None:
+    def _open_alert(self, model_type: ModelType) -> ModelAlertORM | None:
         return self.session.scalar(select(ModelAlertORM).where(
             ModelAlertORM.model_type == model_type,
-            ModelAlertORM.status == AlertStatus.ACTIVE,
-        ))
+            ModelAlertORM.status.in_([AlertStatus.ACTIVE, AlertStatus.ACKNOWLEDGED]),
+        ).order_by(ModelAlertORM.created_at.desc()))
+
+    # Compatibility name for integrations that used the old helper.
+    _active_alert = _open_alert
 
     def _resolve_alerts(self, model_type: ModelType, now: datetime) -> None:
+        # Acknowledgement records operator handling, not recovery. Both open
+        # states close only after a successful publication.
         for alert in self.session.scalars(select(ModelAlertORM).where(
             ModelAlertORM.model_type == model_type,
-            ModelAlertORM.status == AlertStatus.ACTIVE,
+            ModelAlertORM.status.in_([AlertStatus.ACTIVE, AlertStatus.ACKNOWLEDGED]),
         )):
             alert.status = AlertStatus.RESOLVED
             alert.resolved_at = now
@@ -613,10 +619,16 @@ class ModelLifecycleService:
             if not abnormal:
                 return self._active_alert(version.model_type), None, current or version
 
+            # Normalize rows written before health and lifecycle were split.
+            # New writes never use ABNORMAL as a lifecycle value.
+            if version.status is ModelVersionStatus.ABNORMAL:
+                version.status = ModelVersionStatus.PUBLISHED if version.is_current else ModelVersionStatus.RETIRED
+
             # A retry after a committed anomaly must not create another alert
-            # or rollback record.  The active alert remains the source of truth.
-            if version.status is ModelVersionStatus.ABNORMAL and version.health_status is HealthStatus.ABNORMAL:
-                return self._active_alert(version.model_type), None, current or version
+            # or rollback record. An acknowledged alert remains the source of
+            # truth until publication resolves it.
+            if version.health_status is HealthStatus.ABNORMAL:
+                return self._open_alert(version.model_type), None, current or version
 
             now = self._now()
             if current is None or current.id != version.id:
@@ -628,8 +640,7 @@ class ModelLifecycleService:
                 }:
                     raise ModelLifecycleError("该版本状态不可标记异常", "ABNORMAL_STATE_INVALID")
                 version.health_status = HealthStatus.ABNORMAL
-                version.status = ModelVersionStatus.ABNORMAL
-                alert = self._active_alert(version.model_type)
+                alert = self._open_alert(version.model_type)
                 if alert is None:
                     alert = ModelAlertORM(
                         model_type=version.model_type, model_version_id=version.id,
@@ -642,7 +653,8 @@ class ModelLifecycleService:
                     alert.model_version_id = version.id
                     alert.reason = reason
                     alert.rollback_from = version.id
-                    alert.rollback_to=current.id if current else None
+                    alert.rollback_to = current.id if current else None
+                    alert.status = AlertStatus.ACTIVE
                     alert.acknowledged_at = None
                 record.alert_status = AlertStatus.ACTIVE
                 self.session.commit()
@@ -670,9 +682,13 @@ class ModelLifecycleService:
                     baseline = None
 
             version.health_status = HealthStatus.ABNORMAL
-            version.status = ModelVersionStatus.ABNORMAL
             self._clear_current(record)
-            alert = self._active_alert(version.model_type)
+            # Losing current production is a lifecycle transition, not a
+            # second health value. Keep READY candidates READY; a published
+            # source is now a retired historical version.
+            if version.status is ModelVersionStatus.PUBLISHED:
+                version.status = ModelVersionStatus.RETIRED
+            alert = self._open_alert(version.model_type)
             if alert is None:
                 alert = ModelAlertORM(
                     model_type=version.model_type, model_version_id=version.id,
@@ -686,6 +702,7 @@ class ModelLifecycleService:
                 alert.reason = reason
                 alert.rollback_from = version.id
                 alert.rollback_to = None
+                alert.status = AlertStatus.ACTIVE
                 alert.acknowledged_at = None
             record.alert_status = AlertStatus.ACTIVE
             rollback = RollbackRecordORM(
@@ -726,12 +743,27 @@ class ModelLifecycleService:
         return self.mark_abnormal(version.id, reason, abnormal=abnormal)
 
     def alerts(self, *, model_type: ModelType | None = None,
+               status: AlertStatus | None = None,
                active_only: bool = False) -> list[ModelAlertORM]:
         statement = select(ModelAlertORM)
         if model_type is not None:
             statement = statement.where(ModelAlertORM.model_type == model_type)
+        if status is not None:
+            if status is AlertStatus.ACKNOWLEDGED:
+                # Pre-contract SQLite tables may retain ACK as ACTIVE plus an
+                # acknowledgement timestamp because CHECK constraints cannot
+                # be edited in place.
+                statement = statement.where(
+                    (ModelAlertORM.status == AlertStatus.ACKNOWLEDGED)
+                    | ((ModelAlertORM.status == AlertStatus.ACTIVE) & ModelAlertORM.acknowledged_at.is_not(None))
+                )
+            else:
+                statement = statement.where(ModelAlertORM.status == status)
         if active_only:
-            statement = statement.where(ModelAlertORM.status == AlertStatus.ACTIVE)
+            statement = statement.where(
+                ModelAlertORM.status == AlertStatus.ACTIVE,
+                ModelAlertORM.acknowledged_at.is_(None),
+            )
         return list(self.session.scalars(statement.order_by(ModelAlertORM.created_at.desc(), ModelAlertORM.id.desc())).all())
 
     def acknowledge_alert(self, alert_id: str) -> ModelAlertORM:
@@ -740,10 +772,30 @@ class ModelLifecycleService:
             raise ModelLifecycleError("告警不存在", "ALERT_NOT_FOUND")
         if alert.status is AlertStatus.RESOLVED:
             return alert
-        alert.acknowledged_at = self._now()
-        # Do not resolve here.  The alert must remain on the home page until a
-        # successful publication explicitly resolves it.
-        self.session.commit()
+        if alert.status is AlertStatus.ACKNOWLEDGED:
+            return alert
+        acknowledged_at = self._now()
+        alert.acknowledged_at = acknowledged_at
+        alert.status = AlertStatus.ACKNOWLEDGED
+        model_type = self.session.get(ModelTypeORM, alert.model_type)
+        if model_type is not None:
+            model_type.alert_status = AlertStatus.ACKNOWLEDGED
+        # Older SQLite CHECK constraints only know ACTIVE/RESOLVED. Keep the
+        # timestamp as the compatibility source of truth if that write is
+        # rejected; response/query adapters still expose ACKNOWLEDGED.
+        try:
+            self.session.commit()
+        except IntegrityError:
+            self.session.rollback()
+            alert = self.session.get(ModelAlertORM, alert_id)
+            if alert is None:
+                raise ModelLifecycleError("告警不存在", "ALERT_NOT_FOUND")
+            alert.acknowledged_at = acknowledged_at
+            alert.status = AlertStatus.ACTIVE
+            model_type = self.session.get(ModelTypeORM, alert.model_type)
+            if model_type is not None:
+                model_type.alert_status = AlertStatus.ACTIVE
+            self.session.commit()
         return alert
 
     # Explicit operation aliases keep this boundary convenient for callers
@@ -792,7 +844,16 @@ class ModelLifecycleService:
             "train_data_summary": dict(version.train_data_summary or {}),
             "test_data_summary": dict(version.test_data_summary or {}),
             "metrics": dict(version.metrics or {}),
-            "status": version.status.value, "health_status": version.health_status.value,
+            # ABNORMAL was a legacy mixed lifecycle/health value. Infer the
+            # old row's lifecycle from its current pointer when serializing.
+            "status": (
+                (ModelVersionStatus.PUBLISHED if version.is_current else ModelVersionStatus.RETIRED).value
+                if version.status is ModelVersionStatus.ABNORMAL else version.status.value
+            ), "health_status": (
+                HealthStatus.ABNORMAL.value
+                if version.status is ModelVersionStatus.ABNORMAL
+                else version.health_status.value
+            ),
             "is_baseline": version.is_baseline, "is_current": version.is_current,
             "previous_healthy_version_id": version.previous_healthy_version_id,
             "created_at": version.created_at, "published_at": version.published_at,
@@ -802,10 +863,17 @@ class ModelLifecycleService:
 
     @staticmethod
     def to_alert_response(alert: ModelAlertORM) -> dict[str, Any]:
+        # On a pre-ACK SQLite table, acknowledged_at is the compatibility
+        # representation while the persisted enum remains ACTIVE.
+        response_status = (
+            AlertStatus.ACKNOWLEDGED
+            if alert.status is AlertStatus.ACTIVE and alert.acknowledged_at is not None
+            else alert.status
+        )
         return {"id": alert.id, "model_type": alert.model_type.value,
                 "model_version_id": alert.model_version_id, "reason": alert.reason,
                 "rollback_from": alert.rollback_from, "rollback_to": alert.rollback_to,
-                "status": alert.status.value, "created_at": alert.created_at,
+                "status": response_status.value, "created_at": alert.created_at,
                 "acknowledged_at": alert.acknowledged_at, "resolved_at": alert.resolved_at}
 
     @staticmethod

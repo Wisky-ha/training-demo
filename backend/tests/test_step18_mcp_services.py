@@ -38,6 +38,7 @@ class StatefulPreprocessor:
 def _payload(version: str, model: object = PredictableModel()) -> dict:
     return {
         "model_type": "electric_load",
+        "health_status": "HEALTHY",
         "version": version,
         "model_content_base64": base64.b64encode(cloudpickle.dumps(model)).decode(),
         "time_column": "time",

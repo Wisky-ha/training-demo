@@ -30,6 +30,7 @@ class LoadedModel:
 def payload(model_type: str, version: str, **overrides) -> dict:
     body = {
         "model_type": model_type,
+        "health_status": "HEALTHY",
         "version": version,
         "model_content_base64": base64.b64encode(cloudpickle.dumps(LoadedModel())).decode(),
         "time_column": "time",
@@ -106,7 +107,7 @@ def test_current_anomaly_rolls_back_records_alert_and_only_publish_resolves(tmp_
         assert api.client.get("/api/alerts", params={"active_only": True}).json()
         with factory() as session:
             assert len(session.scalars(select(RollbackRecordORM)).all()) == 1
-            assert session.scalar(select(ModelVersionORM).where(ModelVersionORM.version == "v3")).status is ModelVersionStatus.ABNORMAL
+            assert session.scalar(select(ModelVersionORM).where(ModelVersionORM.version == "v3")).status is ModelVersionStatus.RETIRED
             assert session.scalar(select(ModelVersionORM).where(ModelVersionORM.version == "v2")).is_current
 
         replacement = api.save("electric_load", "v4")
@@ -133,7 +134,7 @@ def test_historical_version_and_other_model_type_are_isolated(tmp_path):
         response = api.abnormal("electric_load", "v1")
         assert response.status_code == 200
         with factory() as session:
-            assert session.get(ModelVersionORM, old["id"]).status is ModelVersionStatus.ABNORMAL
+            assert session.get(ModelVersionORM, old["id"]).status is ModelVersionStatus.RETIRED
             assert session.get(ModelVersionORM, current["id"]).is_current
             assert session.get(ModelVersionORM, heating["id"]).is_current
             assert len(session.scalars(select(ModelAlertORM)).all()) == 1

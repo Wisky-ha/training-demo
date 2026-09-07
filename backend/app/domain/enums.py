@@ -11,6 +11,10 @@ class ModelType(str, Enum):
     INTEGRATED_ENERGY = "integrated_energy"
 
 
+# Canonical model_type values used by every resource link and API filter.
+MODEL_TYPE_CODES = tuple(item.value for item in ModelType)
+
+
 class ScriptType(str, Enum):
     """Kinds of Python scripts that can be selected by a training job."""
 
@@ -34,10 +38,15 @@ class DatasetStatus(str, Enum):
 
 
 class HealthStatus(str, Enum):
-    """Operational health of a model version independent of its lifecycle."""
+    """Operational health, independent of a model version's lifecycle.
+
+    ``UNKNOWN`` is intentional: an absent health check is not evidence that a
+    model is healthy and must not pass a health-gated operation.
+    """
 
     HEALTHY = "HEALTHY"
     ABNORMAL = "ABNORMAL"
+    UNKNOWN = "UNKNOWN"
 
 
 class SplitStrategy(str, Enum):
@@ -81,26 +90,54 @@ class PreprocessingStage(str, Enum):
     FAILED = "failed"
 
 
+class ModelLifecycleStatus(str, Enum):
+    """Public lifecycle values for a saved model version.
+
+    Health is deliberately not represented here.  A version can therefore be
+    ``READY`` and ``UNKNOWN`` without conflating lifecycle with health.
+    """
+
+    READY = "READY"
+    PUBLISHED = "PUBLISHED"
+    RETIRED = "RETIRED"
+    FAILED = "FAILED"
+
+
 class ModelVersionStatus(str, Enum):
-    """Lifecycle status of a saved model version."""
+    """Persisted model-version status, including internal compatibility values.
+
+    The public lifecycle contract is :class:`ModelLifecycleStatus`.  ``DRAFT``
+    and ``TRAINING`` remain for the current training executor, while
+    ``ABNORMAL`` is read-only compatibility for pre-contract rows.  New code
+    must record abnormality in ``health_status`` instead of this field.
+    """
 
     DRAFT = "DRAFT"
     TRAINING = "TRAINING"
     READY = "READY"
     PUBLISHED = "PUBLISHED"
     RETIRED = "RETIRED"
-    ABNORMAL = "ABNORMAL"
     FAILED = "FAILED"
+    ABNORMAL = "ABNORMAL"  # legacy rows only; never assign for new writes
+
+
+# Keeping these sets next to the enum makes the boundary explicit for API and
+# UI code without breaking reads of historical DRAFT/TRAINING/ABNORMAL rows.
+MODEL_LIFECYCLE_STATUSES = frozenset(
+    {
+        ModelVersionStatus.READY,
+        ModelVersionStatus.PUBLISHED,
+        ModelVersionStatus.RETIRED,
+        ModelVersionStatus.FAILED,
+    }
+)
 
 
 class AlertStatus(str, Enum):
-    """Status of a model-type anomaly alert.
-
-    ``RESOLVED`` is also the normal/no-open-alert value for the model type
-    record.  An alert is only resolved by a successful model publication.
-    """
+    """Alert state; acknowledgement does not resolve an alert."""
 
     ACTIVE = "ACTIVE"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
     RESOLVED = "RESOLVED"
 
 

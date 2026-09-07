@@ -7,6 +7,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..domain.enums import ModelType, ScriptStatus, ScriptType
+from ..domain.models import ResourceId
 
 
 def _safe_text(value: str, field_name: str) -> str:
@@ -59,7 +60,7 @@ class ScriptResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: ResourceId
     name: str
     script_type: ScriptType
     version: str

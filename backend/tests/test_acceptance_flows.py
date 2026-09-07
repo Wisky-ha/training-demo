@@ -78,7 +78,7 @@ def wait_for(client, job_id: str, status: str, timeout: float = 5):
 def save(client, version: str) -> dict:
     response = client.post(
         "/api/models",
-        json={"model_type": "electric_load", "version": version, "model_path": f"models/{version}.joblib"},
+        json={"model_type": "electric_load", "version": version, "model_path": f"models/{version}.joblib", "health_status": "HEALTHY"},
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -182,11 +182,11 @@ def test_abnormal_current_auto_rolls_back_and_alert_stays_active_until_publish(a
     active = client.get("/api/alerts", params={"active_only": "true"}).json()
     assert len(active) == 1 and active[0]["status"] == "ACTIVE"
     alert_id = active[0]["id"]
-    assert client.post(f"/api/alerts/{alert_id}/acknowledge").json()["status"] == "ACTIVE"
+    assert client.post(f"/api/alerts/{alert_id}/acknowledge").json()["status"] == "ACKNOWLEDGED"
     with factory() as session:
         record = session.scalar(select(RollbackRecordORM).order_by(RollbackRecordORM.created_at.desc()))
         assert record.status is RollbackStatus.SUCCEEDED
-        assert session.get(ModelAlertORM, alert_id).status is AlertStatus.ACTIVE
+        assert session.get(ModelAlertORM, alert_id).status is AlertStatus.ACKNOWLEDGED
         assert session.get(ModelVersionORM, first["id"]).is_current is True
         assert session.get(ModelVersionORM, second["id"]).health_status is HealthStatus.ABNORMAL
     replacement = save(client, "v3")

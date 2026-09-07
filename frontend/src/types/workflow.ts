@@ -28,6 +28,7 @@ export interface WorkflowDraft {
   preprocessScriptId: EntityId | null
   preprocessTaskId: EntityId | null
   preprocessTask: PreprocessTask | null
+  splitId: EntityId | null
   split: DatasetSplitResult | null
   trainScriptId: EntityId | null
   trainingJobId: EntityId | null

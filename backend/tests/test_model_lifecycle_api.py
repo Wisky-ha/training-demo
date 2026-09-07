@@ -33,7 +33,7 @@ def lifecycle_api(tmp_path):
 
 
 def save(client, version: str, *, content: bytes | None = None) -> dict:
-    body = {"model_type": "electric_load", "version": version, "model_path": f"legacy/{version}"}
+    body = {"model_type": "electric_load", "version": version, "model_path": f"legacy/{version}", "health_status": "HEALTHY"}
     if content is not None:
         body["model_content_base64"] = base64.b64encode(content).decode()
     response = client.post("/api/models", json=body)
@@ -113,13 +113,13 @@ def test_abnormal_automatically_uses_nearest_backup_and_alert_lasts_until_publis
     alert_id = alerts.json()[0]["id"]
     acknowledged = client.post(f"/api/alerts/{alert_id}/acknowledge")
     assert acknowledged.status_code == 200
-    assert acknowledged.json()["status"] == "ACTIVE"
+    assert acknowledged.json()["status"] == "ACKNOWLEDGED"
     with factory() as session:
         broken = session.get(ModelVersionORM, third["id"])
         current = session.get(ModelVersionORM, second["id"])
-        assert broken.status is ModelVersionStatus.ABNORMAL and broken.health_status.value == "ABNORMAL"
+        assert broken.status is ModelVersionStatus.RETIRED and broken.health_status.value == "ABNORMAL"
         assert current.is_current and current.status is ModelVersionStatus.PUBLISHED
-        assert session.scalar(select(ModelAlertORM).where(ModelAlertORM.id == alert_id)).status is AlertStatus.ACTIVE
+        assert session.scalar(select(ModelAlertORM).where(ModelAlertORM.id == alert_id)).status is AlertStatus.ACKNOWLEDGED
     # Only a successful publication clears the persistent alert.
     response = publish(client, first["id"])
     assert response.status_code == 409  # v1 is a retired backup, not a new draft
@@ -138,7 +138,7 @@ def test_non_current_abnormal_only_marks_version_and_keeps_current(lifecycle_api
     response = client.post(f"/api/models/{first['id']}/abnormal", json={"reason": "历史版本异常"})
     assert response.status_code == 200, response.text
     with factory() as session:
-        assert session.get(ModelVersionORM, first["id"]).status is ModelVersionStatus.ABNORMAL
+        assert session.get(ModelVersionORM, first["id"]).status is ModelVersionStatus.RETIRED
         assert session.get(ModelVersionORM, second["id"]).is_current
 
 

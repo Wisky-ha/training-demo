@@ -149,7 +149,9 @@ def _upgrade_model_version_columns(engine: Engine) -> None:
         return
     columns = {item["name"] for item in inspect(engine).get_columns("model_versions")}
     additions = {
-        "health_status": "VARCHAR(8) NOT NULL DEFAULT 'HEALTHY'",
+        # Existing databases only get this column when upgraded. A missing
+        # health check must remain UNKNOWN rather than being inferred healthy.
+        "health_status": "VARCHAR(10) NOT NULL DEFAULT 'UNKNOWN'",
         "model_artifact_id": "VARCHAR(36)",
         "preprocessor_artifact_id": "VARCHAR(36)",
     }

@@ -10,8 +10,9 @@ function formatDate(value?: string | null) {
 
 function statusLabel(model?: ModelVersionSummary) {
   if (!model) return '未训练'
-  if (model.is_abnormal || model.health_status?.toLowerCase() === 'abnormal') return '异常'
-  return ({ PUBLISHED: '已发布', READY: '待发布', TRAINING: '训练中', FAILED: '失败', DRAFT: '草稿' } as Record<string, string>)[model.status] ?? model.status
+  if (model.is_abnormal || model.health_status === 'ABNORMAL') return '异常'
+  if (!model.status) return '未知'
+  return ({ PUBLISHED: '已发布', READY: '待发布', TRAINING: '训练中', FAILED: '失败', DRAFT: '草稿', RETIRED: '已下线' } as Record<string, string>)[model.status] ?? '未知'
 }
 
 export function HomePage() {
@@ -68,7 +69,7 @@ export function HomePage() {
           const current = versions.find((version) => version.is_current) ?? versions.find((version) => version.status === 'PUBLISHED')
           const backup = current?.previous_healthy_version_id
             ? versions.find((version) => version.id === current.previous_healthy_version_id)
-            : versions.find((version) => version.id !== current?.id && ['READY', 'PUBLISHED'].includes(version.status))
+            : versions.find((version) => version.id !== current?.id && version.status !== null && ['READY', 'PUBLISHED'].includes(version.status))
           const alert = alerts.find((item) => item.model_type === code)
           return (
             <article className={`model-card${alert ? ' model-card-alert' : ''}`} key={code}>

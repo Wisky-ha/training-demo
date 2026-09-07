@@ -23,6 +23,7 @@ const initialWorkflow: WorkflowDraft = {
   preprocessScriptId: null,
   preprocessTaskId: null,
   preprocessTask: null,
+  splitId: null,
   split: null,
   trainScriptId: null,
   trainingJobId: null,

@@ -559,8 +559,10 @@ class ModelVersionORM(Base):
     status: Mapped[ModelVersionStatus] = mapped_column(
         _enum_column(ModelVersionStatus), nullable=False, default=ModelVersionStatus.DRAFT
     )
+    # No health check result means UNKNOWN; only an explicit check may mark
+    # a version HEALTHY.
     health_status: Mapped[HealthStatus] = mapped_column(
-        _enum_column(HealthStatus), nullable=False, default=HealthStatus.HEALTHY
+        _enum_column(HealthStatus), nullable=False, default=HealthStatus.UNKNOWN
     )
     is_baseline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

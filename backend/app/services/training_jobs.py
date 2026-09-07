@@ -31,6 +31,7 @@ from ..db.models import (
 from ..db.repositories import ModelVersionRepository, TrainingJobRepository
 from ..domain.enums import (
     DatasetStatus,
+    HealthStatus,
     ModelType,
     ModelVersionStatus,
     PreprocessingStage,
@@ -679,7 +680,10 @@ class TrainingJobService:
                 train_data_summary=self._frame_data_summary(train_times, X_train, y_train),
                 test_data_summary=self._frame_data_summary(test_times, X_test, y_test),
                 metrics=copy.deepcopy(evaluation),
+                # A completed training/evaluation pipeline is the explicit
+                # health evidence for its newly produced candidate.
                 status=ModelVersionStatus.DRAFT,
+                health_status=HealthStatus.HEALTHY,
             )
         except Exception:
             # File storage and the SQL transaction cannot be atomic together.

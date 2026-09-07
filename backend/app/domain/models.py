@@ -6,10 +6,10 @@ logic.
 """
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from .enums import (
     AlertStatus,
@@ -33,6 +33,11 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# IDs are opaque resource references. The resource kind is conveyed by the
+# field name, not inferred from the ID's syntax.
+ResourceId = Annotated[str, StringConstraints(min_length=1, max_length=255)]
+
+
 class DomainModel(BaseModel):
     """Common validation settings for domain records."""
 
@@ -46,10 +51,10 @@ class DomainModel(BaseModel):
 class ModelTypeRecord(DomainModel):
     """Registered model family and its current platform state."""
 
-    id: str = Field(default_factory=_new_id)
+    id: ResourceId = Field(default_factory=_new_id)
     code: ModelType
     name: str = Field(min_length=1)
-    current_version_id: str | None = None
+    current_version_id: ResourceId | None = None
     alert_status: AlertStatus = AlertStatus.RESOLVED
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
@@ -58,7 +63,7 @@ class ModelTypeRecord(DomainModel):
 class ScriptRecord(DomainModel):
     """An immutable versioned source entry in the global script library."""
 
-    id: str = Field(default_factory=_new_id)
+    id: ResourceId = Field(default_factory=_new_id)
     name: str = Field(min_length=1)
     script_type: ScriptType
     version: str = Field(min_length=1)
@@ -77,7 +82,7 @@ class ScriptRecord(DomainModel):
 class DatasetRecord(DomainModel):
     """Parsed dataset metadata; the CSV contents are stored outside this record."""
 
-    id: str = Field(default_factory=_new_id)
+    id: ResourceId = Field(default_factory=_new_id)
     file_name: str = Field(min_length=1)
     file_path: str | None = None
     status: DatasetStatus = DatasetStatus.PARSED
@@ -105,12 +110,12 @@ class DatasetRecord(DomainModel):
 class TrainingJob(DomainModel):
     """Configuration and lifecycle metadata for one training run."""
 
-    id: str = Field(default_factory=_new_id)
+    id: ResourceId = Field(default_factory=_new_id)
     model_type: ModelType
-    dataset_id: str = Field(min_length=1)
-    preprocess_script_id: str | None = None
-    preprocessing_task_id: str | None = None
-    train_script_id: str = Field(min_length=1)
+    dataset_id: ResourceId
+    preprocess_script_id: ResourceId | None = None
+    preprocessing_task_id: ResourceId | None = None
+    train_script_id: ResourceId
     split_strategy: SplitStrategy = SplitStrategy.TIME_ORDERED
     # ``split_ratio`` is the required 80% training portion from the spec.
     split_ratio: float = Field(default=0.8, gt=0, lt=1)
@@ -122,7 +127,7 @@ class TrainingJob(DomainModel):
     logs: list[str] = Field(default_factory=list)
     config: dict[str, Any] = Field(default_factory=dict)
     config_summary: dict[str, Any] = Field(default_factory=dict)
-    model_version_id: str | None = None
+    model_version_id: ResourceId | None = None
     error_message: str | None = None
     train_row_count: int | None = Field(default=None, ge=0)
     test_row_count: int | None = Field(default=None, ge=0)
@@ -138,18 +143,18 @@ class TrainingJob(DomainModel):
 class ModelVersion(DomainModel):
     """Traceable model artifact metadata and its release state."""
 
-    id: str = Field(default_factory=_new_id)
+    id: ResourceId = Field(default_factory=_new_id)
     model_type: ModelType
     version: str = Field(min_length=1)
     model_path: str = Field(min_length=1)
     preprocessor_path: str | None = None
-    training_job_id: str | None = None
+    training_job_id: ResourceId | None = None
 
     # Script snapshots make a version independent of later library changes.
-    train_script_id: str | None = None
+    train_script_id: ResourceId | None = None
     train_script_version: str | None = None
     train_script_source: str | None = None
-    preprocess_script_id: str | None = None
+    preprocess_script_id: ResourceId | None = None
     preprocess_script_version: str | None = None
     preprocess_script_source: str | None = None
     preprocess_used: bool = False
@@ -167,10 +172,11 @@ class ModelVersion(DomainModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
 
     status: ModelVersionStatus = ModelVersionStatus.DRAFT
-    health_status: HealthStatus = HealthStatus.HEALTHY
+    # Missing health evidence is explicitly unknown, never implicitly healthy.
+    health_status: HealthStatus = HealthStatus.UNKNOWN
     is_baseline: bool = False
     is_current: bool = False
-    previous_healthy_version_id: str | None = None
+    previous_healthy_version_id: ResourceId | None = None
     created_at: datetime = Field(default_factory=_utc_now)
     published_at: datetime | None = None
 
@@ -178,10 +184,10 @@ class ModelVersion(DomainModel):
 class PublishRecord(DomainModel):
     """Immutable audit entry for making a model version current."""
 
-    id: str = Field(default_factory=_new_id)
-    model_version_id: str = Field(min_length=1)
+    id: ResourceId = Field(default_factory=_new_id)
+    model_version_id: ResourceId
     published_version: str = Field(min_length=1)
-    previous_current_version_id: str | None = None
+    previous_current_version_id: ResourceId | None = None
     published_at: datetime = Field(default_factory=_utc_now)
     message: str | None = None
 
@@ -189,12 +195,12 @@ class PublishRecord(DomainModel):
 class ModelAlert(DomainModel):
     """An anomaly alert kept open until a successful replacement is published."""
 
-    id: str = Field(default_factory=_new_id)
+    id: ResourceId = Field(default_factory=_new_id)
     model_type: ModelType
-    model_version_id: str | None = None
+    model_version_id: ResourceId | None = None
     reason: str = Field(min_length=1)
-    rollback_from: str | None = None
-    rollback_to: str | None = None
+    rollback_from: ResourceId | None = None
+    rollback_to: ResourceId | None = None
     status: AlertStatus = AlertStatus.ACTIVE
     created_at: datetime = Field(default_factory=_utc_now)
     # Acknowledgement does not resolve the alert; publication does.
@@ -205,11 +211,11 @@ class ModelAlert(DomainModel):
 class RollbackRecord(DomainModel):
     """Audit record for a manual or automatic version switch."""
 
-    id: str = Field(default_factory=_new_id)
+    id: ResourceId = Field(default_factory=_new_id)
     model_type: ModelType
-    rollback_from: str | None = None
-    rollback_to: str | None = None
-    alert_id: str | None = None
+    rollback_from: ResourceId | None = None
+    rollback_to: ResourceId | None = None
+    alert_id: ResourceId | None = None
     reason: str | None = None
     status: RollbackStatus = RollbackStatus.PENDING
     created_at: datetime = Field(default_factory=_utc_now)

@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
+from ..domain.models import ResourceId
 from ..domain.enums import (
     AlertStatus,
     HealthStatus,
@@ -28,17 +29,17 @@ class ModelSaveRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    id: str | None = Field(default=None, min_length=1, max_length=36)
+    id: ResourceId | None = None
     model_type: ModelType
     version: str | None = Field(default=None, min_length=1, max_length=100)
     model_path: str | None = Field(default=None, min_length=1, max_length=1024)
     model_content_base64: str | None = None
     preprocessor_path: str | None = Field(default=None, max_length=1024)
-    training_job_id: str | None = Field(default=None, max_length=36)
-    train_script_id: str | None = Field(default=None, max_length=36)
+    training_job_id: ResourceId | None = None
+    train_script_id: ResourceId | None = None
     train_script_version: str | None = Field(default=None, max_length=100)
     train_script_source: str | None = None
-    preprocess_script_id: str | None = Field(default=None, max_length=36)
+    preprocess_script_id: ResourceId | None = None
     preprocess_script_version: str | None = Field(default=None, max_length=100)
     preprocess_script_source: str | None = None
     preprocess_used: bool = False
@@ -53,6 +54,10 @@ class ModelSaveRequest(BaseModel):
     train_data_summary: dict[str, Any] = Field(default_factory=dict)
     test_data_summary: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
+    # None means no health evidence; persistence maps it to UNKNOWN, never
+    # to HEALTHY. The optional form preserves existing training health on a
+    # compatibility save of an already-created draft.
+    health_status: HealthStatus | None = None
     status: ModelVersionStatus = ModelVersionStatus.READY
 
     @model_validator(mode="after")
@@ -65,18 +70,18 @@ class ModelSaveRequest(BaseModel):
 class ModelVersionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: ResourceId
     model_type: ModelType
     version: str
     model_path: str
-    model_artifact_id: str | None
+    model_artifact_id: ResourceId | None
     preprocessor_path: str | None
-    preprocessor_artifact_id: str | None
-    training_job_id: str | None
-    train_script_id: str | None
+    preprocessor_artifact_id: ResourceId | None
+    training_job_id: ResourceId | None
+    train_script_id: ResourceId | None
     train_script_version: str | None
     train_script_source: str | None
-    preprocess_script_id: str | None
+    preprocess_script_id: ResourceId | None
     preprocess_script_version: str | None
     preprocess_script_source: str | None
     preprocess_used: bool
@@ -95,7 +100,7 @@ class ModelVersionResponse(BaseModel):
     health_status: HealthStatus
     is_baseline: bool
     is_current: bool
-    previous_healthy_version_id: str | None
+    previous_healthy_version_id: ResourceId | None
     created_at: datetime
     published_at: datetime | None
     model_file_metadata: dict[str, Any] | None = None
@@ -122,11 +127,11 @@ class PublishRequest(BaseModel):
 class RollbackRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    target_version_id: str | None = Field(default=None, min_length=1, max_length=36)
+    target_version_id: ResourceId | None = None
     target_version: str | None = Field(default=None, min_length=1, max_length=100)
     # Compatibility spellings for clients whose rollback dialog calls the
     # destination simply ``version_id``/``version``.
-    version_id: str | None = Field(default=None, min_length=1, max_length=36)
+    version_id: ResourceId | None = None
     version: str | None = Field(default=None, min_length=1, max_length=100)
     reason: str = Field(default="手动回滚", min_length=1, max_length=2000)
 
@@ -158,12 +163,12 @@ class ModelAbnormalRequest(BaseModel):
 class ModelAlertResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: ResourceId
     model_type: ModelType
-    model_version_id: str | None
+    model_version_id: ResourceId | None
     reason: str
-    rollback_from: str | None
-    rollback_to: str | None
+    rollback_from: ResourceId | None
+    rollback_to: ResourceId | None
     status: AlertStatus
     created_at: datetime
     acknowledged_at: datetime | None
@@ -173,11 +178,11 @@ class ModelAlertResponse(BaseModel):
 class RollbackResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: ResourceId
     model_type: ModelType
-    rollback_from: str | None
-    rollback_to: str | None
-    alert_id: str | None
+    rollback_from: ResourceId | None
+    rollback_to: ResourceId | None
+    alert_id: ResourceId | None
     reason: str | None
     status: RollbackStatus
     created_at: datetime

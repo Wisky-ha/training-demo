@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..domain.enums import SplitStrategy
+from ..domain.models import ResourceId
 
 
 class DatasetSplitRequest(BaseModel):
@@ -19,7 +20,7 @@ class DatasetSplitRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    preprocessing_task_id: str | None = Field(default=None, min_length=1, max_length=255)
+    preprocessing_task_id: ResourceId | None = None
 
 
 class TimeRange(BaseModel):
@@ -32,9 +33,9 @@ class DatasetSplitResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    dataset_id: str
-    preprocessing_task_id: str | None
+    id: ResourceId
+    dataset_id: ResourceId
+    preprocessing_task_id: ResourceId | None
     data_source: Literal["raw", "preprocessed"]
     split_strategy: SplitStrategy
     split_ratio: float

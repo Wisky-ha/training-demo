@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from .db.models import ModelAlertORM, ModelVersionORM, PublishRecordORM, RollbackRecordORM
 from .db.session import get_session
-from .domain.enums import HealthStatus, ModelType, ModelVersionStatus
+from .domain.enums import AlertStatus, HealthStatus, ModelType, ModelVersionStatus
 from .schemas.models import (
     AbnormalRequest,
     LifecycleOperationResponse,
@@ -139,7 +139,7 @@ def save_existing_model(model_id: str, body: ModelSaveRequest, request: Request,
                       "preprocess_script_version", "preprocess_script_source", "input_schema",
                       "feature_columns", "time_column", "target_column", "split_strategy",
                       "split_ratio", "test_ratio", "train_data_summary", "test_data_summary",
-                      "metrics", "preprocess_used", "preprocessor_state"):
+                      "metrics", "preprocess_used", "preprocessor_state", "health_status"):
             value = getattr(body, field)
             if value is not None and value != [] and value != {}:
                 setattr(existing, field, value)
@@ -279,10 +279,11 @@ def model_rollback_records(model_id: str, request: Request, session: Session = D
 @alerts_router.get("", response_model=list[ModelAlertResponse])
 @alerts_router.get("/", response_model=list[ModelAlertResponse], include_in_schema=False)
 def list_alerts(request: Request, model_type: ModelType | None = None,
-                active_only: bool = False, session: Session = Depends(get_session)):
+                status: AlertStatus | None = None, active_only: bool = False,
+                session: Session = Depends(get_session)):
     service = _service(request, session)
     return [service.to_alert_response(item) for item in service.alerts(
-        model_type=model_type, active_only=active_only
+        model_type=model_type, status=status, active_only=active_only
     )]
 
 

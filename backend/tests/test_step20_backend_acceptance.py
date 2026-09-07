@@ -82,6 +82,7 @@ def model_payload(version: str, *, content: bytes | None = None) -> dict:
     content = content or cloudpickle.dumps(Model())
     return {
         "model_type": "electric_load",
+        "health_status": "HEALTHY",
         "version": version,
         "model_content_base64": base64.b64encode(content).decode(),
         "time_column": "time",
@@ -245,6 +246,7 @@ def test_metadata_only_nonlegacy_release_is_rejected(api):
     client, _, _ = api
     response = client.post("/api/models", json={
         "model_type": "electric_load", "version": "v1", "model_path": "missing/model.bin",
+        "health_status": "HEALTHY",
     })
     assert response.status_code == 201
     rejected = client.post(f"/api/models/{response.json()['id']}/publish", json={"confirm": True})

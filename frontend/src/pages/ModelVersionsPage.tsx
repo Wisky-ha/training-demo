@@ -7,7 +7,7 @@ type ActionType = 'publish' | 'offline' | 'rollback'
 const lifecycleLabels: Record<string, string> = {
   DRAFT: '草稿', TRAINING: '训练中', READY: '待发布', PUBLISHED: '已发布', RETIRED: '已下线', ABNORMAL: '异常', FAILED: '失败',
 }
-const healthLabels: Record<string, string> = { HEALTHY: '健康', ABNORMAL: '异常' }
+const healthLabels: Record<string, string> = { HEALTHY: '健康', ABNORMAL: '异常', UNKNOWN: '未知' }
 
 function errorMessage(reason: unknown) {
   return reason instanceof ApiError ? reason.message : reason instanceof Error ? reason.message : '请求失败，请稍后重试'
@@ -20,20 +20,20 @@ function formatDate(value?: string | null) {
 }
 
 function lifecycle(model: ModelVersionSummary) {
-  return lifecycleLabels[model.status] ?? model.status
+  return model.status ? lifecycleLabels[model.status] ?? '未知' : '未知'
 }
 
 function health(model: ModelVersionSummary) {
-  const value = String(model.health_status ?? (model.is_abnormal ? 'ABNORMAL' : 'HEALTHY')).toUpperCase()
-  return healthLabels[value] ?? value
+  const value = model.health_status ?? (model.is_abnormal ? 'ABNORMAL' : 'UNKNOWN')
+  return healthLabels[value] ?? '未知'
 }
 
 function isHealthy(model: ModelVersionSummary) {
-  return String(model.health_status ?? 'HEALTHY').toUpperCase() === 'HEALTHY' && !model.is_abnormal
+  return model.health_status === 'HEALTHY' && !model.is_abnormal
 }
 
 function isRollbackTarget(model: ModelVersionSummary, current?: ModelVersionSummary) {
-  return Boolean(current && current.id !== model.id && isHealthy(model) && model.published_at && ['PUBLISHED', 'RETIRED'].includes(model.status))
+  return Boolean(current && current.id !== model.id && isHealthy(model) && model.published_at && model.status !== null && ['PUBLISHED', 'RETIRED'].includes(model.status))
 }
 
 function metricEntries(metrics: ModelVersionSummary['metrics']) {

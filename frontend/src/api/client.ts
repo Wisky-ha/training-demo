@@ -7,13 +7,13 @@ import type {
   DatasetSplitResult,
   EntityId,
   HealthResponse,
+  HealthStatus,
   JsonValue,
   ListAlertsParams,
   ListModelsParams,
   ListScriptsParams,
   ModelAlert,
   ModelEvaluation,
-  ModelTypeContract,
   ModelTypeCode,
   ModelVersionDetail,
   ModelVersionSummary,
@@ -139,16 +139,30 @@ function toErrorResponse(payload: unknown, status: number): ApiError {
   })
 }
 
-const MODEL_STATUSES: ModelVersionSummary['status'][] = [
-  'DRAFT', 'TRAINING', 'READY', 'PUBLISHED', 'RETIRED', 'ABNORMAL', 'FAILED',
+const MODEL_STATUSES: Exclude<ModelVersionSummary['status'], null>[] = [
+  'DRAFT', 'TRAINING', 'READY', 'PUBLISHED', 'RETIRED', 'FAILED',
 ]
+const HEALTH_STATUSES = new Set<HealthStatus>(['HEALTHY', 'ABNORMAL', 'UNKNOWN'])
 
 function normalizeModel(value: unknown): ModelVersionSummary | null {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.model_type !== 'string' || typeof value.version !== 'string') {
     return null
   }
-  const status = String(value.status ?? 'READY').toUpperCase() as ModelVersionSummary['status']
-  const healthStatus = typeof value.health_status === 'string' ? value.health_status.toUpperCase() : typeof value.healthStatus === 'string' ? value.healthStatus.toUpperCase() : 'HEALTHY'
+  const rawStatus = typeof value.status === 'string' ? value.status.toUpperCase() : null
+  const isCurrent = value.is_current === true
+  // ABNORMAL was historically mixed into lifecycle. Keep parsing it, but
+  // expose the lifecycle that can be inferred from the current pointer.
+  const status = rawStatus === 'ABNORMAL'
+    ? (isCurrent ? 'PUBLISHED' : 'RETIRED')
+    : rawStatus as ModelVersionSummary['status']
+  const rawHealth = typeof value.health_status === 'string'
+    ? value.health_status.toUpperCase()
+    : typeof value.healthStatus === 'string' ? value.healthStatus.toUpperCase() : 'UNKNOWN'
+  const healthStatus = rawStatus === 'ABNORMAL'
+    ? 'ABNORMAL'
+    : HEALTH_STATUSES.has(rawHealth as HealthStatus)
+      ? rawHealth as HealthStatus
+      : 'UNKNOWN'
   const metrics = value.metrics === null ? null : isRecord(value.metrics) ? value.metrics as Record<string, JsonValue> : {}
   const trainScript = isRecord(value.train_script) && typeof value.train_script.id === 'string' && typeof value.train_script.name === 'string' && typeof value.train_script.version === 'string'
     ? { id: value.train_script.id, name: value.train_script.name, version: value.train_script.version } : null
@@ -158,11 +172,11 @@ function normalizeModel(value: unknown): ModelVersionSummary | null {
     id: value.id,
     model_type: value.model_type as ModelVersionSummary['model_type'],
     version: value.version,
-    status: MODEL_STATUSES.includes(status) ? status : 'READY',
+    status: status && MODEL_STATUSES.includes(status) ? status : null,
     health_status: healthStatus,
     is_baseline: value.is_baseline === true,
-    is_current: value.is_current === true,
-    is_abnormal: value.is_abnormal === true || healthStatus === 'ABNORMAL',
+    is_current: isCurrent,
+    is_abnormal: value.is_abnormal === true || healthStatus === 'ABNORMAL' || rawStatus === 'ABNORMAL',
     is_rollback_available: value.is_rollback_available === true,
     metrics,
     model_path: typeof value.model_path === 'string' ? value.model_path : null,
@@ -206,8 +220,9 @@ function normalizeAlert(value: unknown): ModelAlert | null {
     reason: typeof value.reason === 'string' ? value.reason : '未提供异常原因',
     rollback_from: typeof value.rollback_from === 'string' ? value.rollback_from : null,
     rollback_to: typeof value.rollback_to === 'string' ? value.rollback_to : null,
-    status: status === 'RESOLVED' ? 'RESOLVED' : 'ACTIVE',
+    status: status === 'ACTIVE' || status === 'ACKNOWLEDGED' || status === 'RESOLVED' ? status : null,
     created_at: typeof value.created_at === 'string' ? value.created_at : '',
+    acknowledged_at: typeof value.acknowledged_at === 'string' ? value.acknowledged_at : null,
     resolved_at: typeof value.resolved_at === 'string' ? value.resolved_at : null,
   }
 }
@@ -262,7 +277,10 @@ export class ApiClient {
     this.baseUrl = resolveApiBaseUrl(
       options.baseUrl ?? import.meta.env.VITE_API_BASE_URL,
     )
-    this.fetchImpl = options.fetchImpl ?? fetch
+    // `fetch` is a Web IDL method and must retain its global receiver in
+    // browsers. Store a bound default while leaving injected test adapters
+    // untouched.
+    this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis)
   }
 
   private buildUrl(path: string, query?: RequestOptions['query']): string {
@@ -339,10 +357,6 @@ export class ApiClient {
 
   getHealth(options?: RequestOptions): Promise<HealthResponse> {
     return this.get<HealthResponse>('health', options)
-  }
-
-  listModelTypes(options?: RequestOptions): Promise<ModelTypeContract[]> {
-    return this.get<ModelTypeContract[]>('model-types', options)
   }
 
   uploadDataset(file: File, options: DatasetUploadOptions = {}): Promise<DatasetUploadResult> {
@@ -517,7 +531,7 @@ export class ApiClient {
   }
 
   predict(input: PredictionRequest): Promise<PredictionResponse> {
-    return this.postJson<PredictionResponse, PredictionRequest>('predict', input)
+    return this.postJson<PredictionResponse, PredictionRequest>('mcp/predict', input)
   }
 }
 

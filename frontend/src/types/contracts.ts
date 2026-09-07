@@ -7,7 +7,10 @@
  * page is implemented.
  */
 
-export type EntityId = string
+/** Opaque identifier for a persisted resource; the field name gives its kind. */
+export type ResourceId = string
+/** Compatibility alias retained for existing page/store code. */
+export type EntityId = ResourceId
 export type IsoDateTime = string
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
@@ -21,38 +24,25 @@ export const MODEL_TYPE_CODES = [
 
 export type ModelTypeCode = (typeof MODEL_TYPE_CODES)[number]
 
+export const MODEL_LIFECYCLE_STATUSES = [
+  'READY',
+  'PUBLISHED',
+  'RETIRED',
+  'FAILED',
+] as const
+
+export type ModelLifecycleStatus = (typeof MODEL_LIFECYCLE_STATUSES)[number]
+
 export const MODEL_TYPE_NAMES: Record<ModelTypeCode, string> = {
   electric_load: '电力负荷预测',
   heating_cooling_load: '冷热负荷预测',
   integrated_energy: '综合能耗预测',
 }
 
-/** Model-type alert status used by the current backend (uppercase values are canonical). */
-export type AlertStatus = 'ACTIVE' | 'RESOLVED' | 'healthy' | 'active' | 'resolved'
-export type HealthStatus = 'HEALTHY' | 'ABNORMAL' | 'healthy' | 'abnormal'
-export type ModelTypeStatus =
-  | 'untrained'
-  | 'training'
-  | 'ready'
-  | 'published'
-  | 'retired'
-  | 'abnormal'
-  | 'failed'
-
-export interface ModelTypeContract {
-  id: EntityId
-  code: ModelTypeCode
-  name: string
-  description?: string
-  current_version_id: EntityId | null
-  current_version?: ModelVersionSummary | null
-  status: ModelTypeStatus
-  alert_status: AlertStatus
-  backup_version_id?: EntityId | null
-  last_trained_at: IsoDateTime | null
-  created_at: IsoDateTime
-  updated_at: IsoDateTime
-}
+export type HealthStatus = 'HEALTHY' | 'ABNORMAL' | 'UNKNOWN'
+/** Legacy wire values accepted only by compatibility normalizers. */
+export type LegacyHealthStatus = 'healthy' | 'abnormal'
+export type HealthStatusWire = HealthStatus | LegacyHealthStatus
 
 export type ScriptType = 'preprocessor' | 'trainer'
 export type ScriptStatus = 'enabled' | 'disabled' | 'ENABLED' | 'DISABLED'
@@ -138,7 +128,13 @@ export interface PreprocessResultSummary {
 }
 
 export type WorkflowStageStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped'
-export type PreprocessStage = 'waiting' | 'data_reading' | 'preprocessing' | 'validating' | 'completed'
+export type PreprocessStage =
+  | 'waiting'
+  | 'data_reading'
+  | 'preprocessing'
+  | 'validating'
+  | 'completed'
+  | 'failed'
 export type TrainingStage =
   | 'preparing_data'
   | 'loading_script'
@@ -162,7 +158,18 @@ export interface PreprocessTask {
   preprocess_script_id?: EntityId | null
   preprocess_used?: boolean
   preprocess_status?: 'used' | 'unused'
-  status: WorkflowStageStatus | 'waiting' | 'running' | 'succeeded' | 'skipped' | 'failed'
+  status:
+    | WorkflowStageStatus
+    | 'waiting'
+    | 'running'
+    | 'succeeded'
+    | 'skipped'
+    | 'failed'
+    | 'WAITING'
+    | 'RUNNING'
+    | 'SUCCEEDED'
+    | 'SKIPPED'
+    | 'FAILED'
   current_stage?: PreprocessStage
   stage?: PreprocessStage
   progress_stage?: PreprocessStage
@@ -362,21 +369,20 @@ export interface DataSummary {
   columns: string[]
 }
 
-export type ModelVersionStatus =
-  | 'DRAFT'
-  | 'TRAINING'
-  | 'READY'
-  | 'PUBLISHED'
-  | 'RETIRED'
-  | 'ABNORMAL'
-  | 'FAILED'
+/**
+ * Lifecycle status on the wire. DRAFT/TRAINING are internal compatibility
+ * values; ABNORMAL is a legacy value and must be split into health_status by
+ * a normalizer rather than rendered as lifecycle.
+ */
+export type ModelVersionStatus = ModelLifecycleStatus | 'DRAFT' | 'TRAINING' | 'ABNORMAL'
 
 export interface ModelVersionSummary {
   id: EntityId
   model_type: ModelTypeCode
   version: string
-  status: ModelVersionStatus
-  health_status?: HealthStatus | string
+  /** Null means the API did not provide a lifecycle value. */
+  status: ModelVersionStatus | null
+  health_status?: HealthStatus | null
   is_baseline: boolean
   is_current: boolean
   is_abnormal?: boolean
@@ -438,6 +444,7 @@ export interface PublishModelRequest {
 
 export interface ModelSaveRequest {
   model_type: ModelTypeCode
+  health_status?: HealthStatus
   status?: 'DRAFT' | 'READY'
   training_job_id?: EntityId
   train_script_id?: EntityId
@@ -488,7 +495,10 @@ export interface RollbackResponse {
   record?: RollbackRecord
 }
 
-export type ModelAlertState = 'ACTIVE' | 'RESOLVED'
+export const MODEL_ALERT_STATUSES = ['ACTIVE', 'ACKNOWLEDGED', 'RESOLVED'] as const
+export type ModelAlertState = (typeof MODEL_ALERT_STATUSES)[number]
+/** Compatibility alias for callers that use the backend enum name. */
+export type AlertStatus = ModelAlertState
 
 export interface ModelAlert {
   id: EntityId
@@ -497,8 +507,10 @@ export interface ModelAlert {
   reason: string
   rollback_from: EntityId | null
   rollback_to: EntityId | null
-  status: ModelAlertState
+  /** Null is reserved for malformed/legacy responses; it is never ACTIVE. */
+  status: ModelAlertState | null
   created_at: IsoDateTime
+  acknowledged_at: IsoDateTime | null
   resolved_at: IsoDateTime | null
 }
 
@@ -507,12 +519,6 @@ export interface MarkModelAbnormalRequest {
   model_version: string
   abnormal: true
   reason: string
-}
-
-export interface MarkModelAbnormalResponse {
-  alert: ModelAlert | null
-  current_model: ModelVersionSummary
-  rollback: RollbackRecord | null
 }
 
 export interface PredictionRequest {

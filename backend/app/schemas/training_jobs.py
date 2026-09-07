@@ -8,31 +8,32 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..domain.enums import ModelType, SplitStrategy, TrainingJobStatus
+from ..domain.models import ResourceId
 
 
 class TrainingJobCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model_type: ModelType
-    dataset_id: str = Field(min_length=1, max_length=255)
-    preprocess_script_id: str | None = Field(default=None, max_length=255)
+    dataset_id: ResourceId
+    preprocess_script_id: ResourceId | None = None
     # Usually this is inferred from the dataset's immutable split.  It is
     # accepted explicitly so a client cannot accidentally pair a script with
     # a different completed preprocessing task.
-    preprocessing_task_id: str | None = Field(default=None, max_length=255)
-    train_script_id: str = Field(min_length=1, max_length=255)
+    preprocessing_task_id: ResourceId | None = None
+    train_script_id: ResourceId
     config: dict[str, Any] = Field(default_factory=dict)
 
 
 class TrainingJobResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: ResourceId
     model_type: ModelType
-    dataset_id: str
-    preprocess_script_id: str | None
-    preprocessing_task_id: str | None
-    train_script_id: str
+    dataset_id: ResourceId
+    preprocess_script_id: ResourceId | None
+    preprocessing_task_id: ResourceId | None
+    train_script_id: ResourceId
     split_strategy: SplitStrategy
     split_ratio: float
     test_ratio: float
@@ -48,7 +49,7 @@ class TrainingJobResponse(BaseModel):
     error_details: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any]
     config_summary: dict[str, Any]
-    model_version_id: str | None
+    model_version_id: ResourceId | None
     train_row_count: int | None
     test_row_count: int | None
     train_time_start: datetime | None
@@ -63,7 +64,7 @@ class TrainingJobResponse(BaseModel):
 class TrainingJobLogsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    job_id: str
+    job_id: ResourceId
     items: list[str]
 
 
@@ -85,8 +86,8 @@ class EvaluationResponse(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    job_id: str
-    model_version_id: str
+    job_id: ResourceId
+    model_version_id: ResourceId
     metrics: MetricSet
     chart_data: list[dict[str, Any]]
     # These persisted series are never chart-sampled and cover every test row.
