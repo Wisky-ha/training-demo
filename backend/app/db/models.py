@@ -17,6 +17,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Enum as SAEnum,
+    event,
     ForeignKey,
     Index,
     Integer,
@@ -28,7 +29,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.ext.mutable import MutableDict, MutableList
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, synonym
 
 from ..domain.enums import (
     AlertStatus,
@@ -752,6 +753,103 @@ class RollbackRecordORM(Base):
     alert: Mapped[ModelAlertORM | None] = relationship("ModelAlertORM", back_populates="rollback_records")
 
 
+class AuditEventORM(Base):
+    """An immutable, append-only record of a server-side domain event.
+
+    ``object_type``/``object_id`` form the polymorphic object reference used by
+    the audit contract.  The nullable resource links are denormalized query
+    links for the model family, version, and training job when those resources
+    are known; they intentionally use ``SET NULL`` so retaining an audit event
+    never prevents resource cleanup.
+
+    ``metadata`` is a reserved SQLAlchemy declarative attribute name, so the
+    Python attribute is ``event_metadata`` while the persisted column keeps the
+    contract name ``metadata``.
+    """
+
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        # The event id is the tie breaker for deterministic reverse chronology.
+        Index("ix_audit_events_occurred_at_event_id", "occurred_at", "event_id"),
+        Index("ix_audit_events_event_type", "event_type"),
+        Index("ix_audit_events_object_type_object_id", "object_type", "object_id"),
+        Index("ix_audit_events_model_type", "model_type"),
+        Index("ix_audit_events_result", "result"),
+        Index("ix_audit_events_model_version_id", "model_version_id"),
+        Index("ix_audit_events_training_job_id", "training_job_id"),
+        Index("ix_audit_events_request_id", "request_id"),
+        Index("ix_audit_events_correlation_id", "correlation_id"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    # ``id`` is a query/API compatibility alias; the physical key remains the
+    # explicit ``event_id`` required by the audit contract.
+    id = synonym("event_id")
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    object_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    object_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_type: Mapped[ModelType | None] = mapped_column(
+        _enum_column(ModelType),
+        ForeignKey("model_types.code", ondelete="SET NULL"),
+        nullable=True,
+    )
+    model_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("model_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    training_job_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("training_jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    operator_type: Mapped[str] = mapped_column(String(32), nullable=False, default="SYSTEM")
+    operator_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    operator_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    result: Mapped[str] = mapped_column(String(32), nullable=False)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    event_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", MutableDict.as_mutable(JSON), nullable=False, default=dict
+    )
+
+    def __init__(self, **kwargs: Any):
+        # ``metadata`` is reserved while the declarative class is built, but it
+        # remains the public field name in the audit contract.
+        if "metadata" in kwargs:
+            if "event_metadata" in kwargs:
+                raise TypeError("pass either metadata or event_metadata, not both")
+            kwargs["event_metadata"] = kwargs.pop("metadata")
+        super().__init__(**kwargs)
+
+    def __getattribute__(self, name: str):
+        # Make the contract field readable on instances despite SQLAlchemy's
+        # declarative ``Base.metadata`` attribute.
+        if name == "metadata":
+            name = "event_metadata"
+        return super().__getattribute__(name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "metadata":
+            name = "event_metadata"
+        super().__setattr__(name, value)
+
+
+
+@event.listens_for(AuditEventORM, "before_update")
+def _reject_audit_event_update(mapper, connection, target) -> None:
+    """Prevent ORM updates to the audit log at the model boundary."""
+
+    raise ValueError("Audit events are append-only and cannot be updated")
+
+
+@event.listens_for(AuditEventORM, "before_delete")
+def _reject_audit_event_delete(mapper, connection, target) -> None:
+    """Prevent ORM deletes to the audit log at the model boundary."""
+
+    raise ValueError("Audit events are append-only and cannot be deleted")
+
+
 # Convenient names for callers that do not need to distinguish ORM from domain
 # records.  The explicit ORM suffixes remain available for unambiguous imports.
 ModelTypeModel = ModelTypeORM
@@ -767,6 +865,7 @@ ModelReleaseORM = PublishRecordORM
 ReleaseRecordORM = PublishRecordORM
 ModelAlertModel = ModelAlertORM
 RollbackModel = RollbackRecordORM
+AuditEventModel = AuditEventORM
 
 __all__ = [
     "Base",
@@ -784,6 +883,7 @@ __all__ = [
     "ReleaseRecordORM",
     "ModelAlertORM",
     "RollbackRecordORM",
+    "AuditEventORM",
     "ModelTypeModel",
     "ScriptModel",
     "DatasetModel",
@@ -795,4 +895,5 @@ __all__ = [
     "PublishRecordModel",
     "ModelAlertModel",
     "RollbackModel",
+    "AuditEventModel",
 ]

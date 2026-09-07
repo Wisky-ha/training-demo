@@ -1,6 +1,7 @@
 """Database infrastructure and persistence model exports."""
 
 from .models import (
+    AuditEventORM,
     Base,
     DatasetORM,
     DatasetSplitORM,
@@ -43,6 +44,7 @@ from .session import (
 
 __all__ = [
     "Base",
+    "AuditEventORM",
     "ModelTypeORM",
     "ModelReleaseORM",
     "ReleaseRecordORM",

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from backend.app.db.models import (
+    AuditEventORM,
     DatasetORM,
     ModelAlertORM,
     ModelTypeORM,
@@ -52,12 +53,93 @@ def test_sqlite_database_has_core_tables_and_indexes(session: Session):
         "model_versions",
         "model_alerts",
         "rollback_records",
+        "audit_events",
     } <= names
     inspector = inspect(session.bind)
     indexes = {index["name"] for index in inspector.get_indexes("model_versions")}
     constraints = {item["name"] for item in inspector.get_unique_constraints("model_versions")}
     assert "ix_model_versions_model_type" in indexes
     assert "uq_model_versions_type_version" in constraints
+    audit_indexes = {index["name"] for index in inspector.get_indexes("audit_events")}
+    assert {
+        "ix_audit_events_occurred_at_event_id",
+        "ix_audit_events_event_type",
+        "ix_audit_events_object_type_object_id",
+        "ix_audit_events_model_type",
+        "ix_audit_events_result",
+        "ix_audit_events_model_version_id",
+        "ix_audit_events_training_job_id",
+    } <= audit_indexes
+
+
+def test_audit_events_are_queryable_and_append_only(session: Session):
+    first = AuditEventORM(
+        event_id="evt-1",
+        occurred_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        event_type="MODEL_SAVED",
+        object_type="MODEL_VERSION",
+        object_id="version-1",
+        result="SUCCEEDED",
+        metadata={"source": "test"},
+    )
+    second = AuditEventORM(
+        event_id="evt-2",
+        occurred_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        event_type="MODEL_PUBLISHED",
+        object_type="MODEL_VERSION",
+        object_id="version-1",
+        model_type=None,
+        model_version_id=None,
+        result="SUCCEEDED",
+    )
+    # Resource IDs are nullable links; use a standalone event for the query
+    # contract so this test does not need to construct the entire workflow.
+    second.model_version_id = None
+    session.add_all([first, second])
+    session.commit()
+
+    events = list(session.scalars(
+        select(AuditEventORM).order_by(
+            AuditEventORM.occurred_at.desc(), AuditEventORM.event_id.desc()
+        )
+    ))
+    assert [item.event_id for item in events[:2]] == ["evt-2", "evt-1"]
+    assert events[1].event_metadata == {"source": "test"}
+    assert events[1].metadata == {"source": "test"}
+
+    first.message = "must not change"
+    with pytest.raises(ValueError, match="append-only"):
+        session.flush()
+    session.rollback()
+    assert session.get(AuditEventORM, "evt-1").message is None
+
+    event_to_delete = session.get(AuditEventORM, "evt-1")
+    session.delete(event_to_delete)
+    with pytest.raises(ValueError, match="append-only"):
+        session.flush()
+    session.rollback()
+    assert session.get(AuditEventORM, "evt-1") is not None
+
+
+def test_initialize_database_recreates_audit_table_without_touching_existing_tables(session: Session):
+    engine = session.bind
+    session.add(ModelTypeORM(code=ModelType.INTEGRATED_ENERGY, name="综合能耗"))
+    session.commit()
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE audit_events")
+
+    initialize_database(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP INDEX ix_audit_events_result")
+    initialize_database(engine)
+    assert "audit_events" in inspect(engine).get_table_names()
+    assert "ix_audit_events_result" in {
+        index["name"] for index in inspect(engine).get_indexes("audit_events")
+    }
+    with Session(engine) as check:
+        assert check.scalar(select(ModelTypeORM).where(
+            ModelTypeORM.code == ModelType.INTEGRATED_ENERGY
+        )) is not None
 
 
 def test_core_relationships_and_json_fields(session: Session):

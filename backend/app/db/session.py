@@ -105,12 +105,48 @@ def initialize_database(
     active_engine = engine if engine is not None else create_database_engine(settings)
     _configure_sqlite_foreign_keys(active_engine)
     Base.metadata.create_all(active_engine)
+    _upgrade_audit_event_indexes(active_engine)
     _upgrade_training_job_columns(active_engine)
     _upgrade_preprocessing_task_columns(active_engine)
     _upgrade_model_version_columns(active_engine)
     _upgrade_model_alert_columns(active_engine)
     _upgrade_publish_record_columns(active_engine)
     return active_engine
+
+
+def _upgrade_audit_event_indexes(engine: Engine) -> None:
+    """Create audit indexes additively for older SQLite schemas.
+
+    ``create_all`` creates the new table on an existing database, but this
+    explicit idempotent step also repairs a database that was initialized by a
+    partially deployed version.  It only adds indexes and never rewrites or
+    removes audit history.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    index_definitions = (
+        "CREATE INDEX IF NOT EXISTS ix_audit_events_occurred_at_event_id "
+        "ON audit_events (occurred_at, event_id)",
+        "CREATE INDEX IF NOT EXISTS ix_audit_events_event_type "
+        "ON audit_events (event_type)",
+        "CREATE INDEX IF NOT EXISTS ix_audit_events_object_type_object_id "
+        "ON audit_events (object_type, object_id)",
+        "CREATE INDEX IF NOT EXISTS ix_audit_events_model_type "
+        "ON audit_events (model_type)",
+        "CREATE INDEX IF NOT EXISTS ix_audit_events_result "
+        "ON audit_events (result)",
+        "CREATE INDEX IF NOT EXISTS ix_audit_events_model_version_id "
+        "ON audit_events (model_version_id)",
+        "CREATE INDEX IF NOT EXISTS ix_audit_events_training_job_id "
+        "ON audit_events (training_job_id)",
+        "CREATE INDEX IF NOT EXISTS ix_audit_events_request_id "
+        "ON audit_events (request_id)",
+        "CREATE INDEX IF NOT EXISTS ix_audit_events_correlation_id "
+        "ON audit_events (correlation_id)",
+    )
+    with engine.begin() as connection:
+        for definition in index_definitions:
+            connection.execute(text(definition))
 
 
 def _upgrade_publish_record_columns(engine: Engine) -> None:
