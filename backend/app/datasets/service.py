@@ -19,6 +19,7 @@ from ..core.config import Settings, get_settings
 from ..db.repositories import DatasetRepository
 from ..domain.models import DatasetRecord
 from ..storage import FileStorageService, StoredArtifact
+from ..services.audit_events import AuditContext, record_audit_event, record_failure_audit_event
 
 
 @dataclass(frozen=True, slots=True)
@@ -700,62 +701,100 @@ class DatasetService:
         *,
         content_type: str | None = None,
         commit: bool = True,
+        audit_context: AuditContext | None = None,
     ) -> dict[str, Any]:
         """Parse, persist, and return one uploaded dataset inspection result."""
 
-        if content_type and content_type.lower().split(";", 1)[0].strip() not in self.CSV_CONTENT_TYPES:
-            raise UnsupportedDatasetFileError(
-                f"不支持的文件类型“{content_type}”，请上传 CSV 文件"
-            )
-        if len(content) > self.settings.max_dataset_size_bytes:
-            raise CSVParseError(
-                f"CSV 文件超过大小限制（最大 {self.settings.max_dataset_size_bytes} 字节）",
-                code="FILE_TOO_LARGE",
-                field="file",
-            )
-        parsed = self.parse_csv(file_name, content, preview_rows=self.preview_rows)
-        if self.session is None:
-            raise RuntimeError("保存数据集需要提供数据库 session")
-
         dataset_id = str(uuid4())
-        artifact: StoredArtifact | None = None
         try:
-            artifact = self.storage.save_dataset(dataset_id, content)
-            created_at = datetime.now(timezone.utc)
-            record = DatasetRecord(
-                id=dataset_id,
-                file_name=parsed.file_name,
-                file_path=artifact.relative_path,
-                row_count=parsed.row_count,
-                columns=parsed.columns,
-                time_column=parsed.time_column,
-                feature_columns=parsed.feature_columns,
-                target_column=parsed.target_column,
-                column_types=parsed.column_types,
-                missing_value_counts=parsed.missing_value_counts,
-                preview_rows=parsed.preview_rows,
-                numeric_columns=[
-                    column
-                    for column in parsed.columns
-                    if parsed.column_types[column] == "number"
-                ],
-                time_parse=parsed.time_parse,
-                time_range=parsed.time_range,
-                summary=parsed.summary,
-            )
-            DatasetRepository(self.session).create(record)
-            if commit:
-                self.session.commit()
-        except Exception:
-            self.session.rollback()
-            # File writes and database commits cannot share one transaction;
-            # compensate an already-written file when metadata persistence
-            # fails so failed uploads do not leave orphaned CSVs.
-            if artifact is not None:
-                try:
-                    self.storage.remove_dataset(dataset_id)
-                except Exception:
-                    pass
+            if content_type and content_type.lower().split(";", 1)[0].strip() not in self.CSV_CONTENT_TYPES:
+                raise UnsupportedDatasetFileError(
+                    f"不支持的文件类型“{content_type}”，请上传 CSV 文件"
+                )
+            if len(content) > self.settings.max_dataset_size_bytes:
+                raise CSVParseError(
+                    f"CSV 文件超过大小限制（最大 {self.settings.max_dataset_size_bytes} 字节）",
+                    code="FILE_TOO_LARGE",
+                    field="file",
+                )
+            parsed = self.parse_csv(file_name, content, preview_rows=self.preview_rows)
+            if self.session is None:
+                raise RuntimeError("保存数据集需要提供数据库 session")
+
+            artifact: StoredArtifact | None = None
+            try:
+                artifact = self.storage.save_dataset(dataset_id, content)
+                created_at = datetime.now(timezone.utc)
+                record = DatasetRecord(
+                    id=dataset_id,
+                    file_name=parsed.file_name,
+                    file_path=artifact.relative_path,
+                    row_count=parsed.row_count,
+                    columns=parsed.columns,
+                    time_column=parsed.time_column,
+                    feature_columns=parsed.feature_columns,
+                    target_column=parsed.target_column,
+                    column_types=parsed.column_types,
+                    missing_value_counts=parsed.missing_value_counts,
+                    preview_rows=parsed.preview_rows,
+                    numeric_columns=[
+                        column
+                        for column in parsed.columns
+                        if parsed.column_types[column] == "number"
+                    ],
+                    time_parse=parsed.time_parse,
+                    time_range=parsed.time_range,
+                    summary=parsed.summary,
+                )
+                DatasetRepository(self.session).create(record)
+                record_audit_event(
+                    self.session,
+                    event_type="DATASET_UPLOADED", object_type="DATASET", object_id=dataset_id,
+                    message="数据集上传并保存成功",
+                    metadata={"file_name": parsed.file_name, "row_count": parsed.row_count},
+                    context=audit_context,
+                )
+                record_audit_event(
+                    self.session,
+                    event_type="DATASET_VALIDATED", object_type="DATASET", object_id=dataset_id,
+                    message="数据集校验完成",
+                    metadata={"row_count": parsed.row_count, "column_count": len(parsed.columns)},
+                    context=audit_context,
+                )
+                if commit:
+                    self.session.commit()
+            except Exception:
+                self.session.rollback()
+                # File writes and database commits cannot share one transaction;
+                # compensate an already-written file when metadata persistence
+                # fails so failed uploads do not leave orphaned CSVs.
+                if artifact is not None:
+                    try:
+                        self.storage.remove_dataset(dataset_id)
+                    except Exception:
+                        pass
+                raise
+        except CSVParseError as exc:
+            if self.session is not None:
+                record_failure_audit_event(
+                    self.session, event_type="DATASET_VALIDATED", object_type="DATASET",
+                    object_id=None, message=str(exc),
+                    metadata={"error_code": getattr(exc, "default_code", type(exc).__name__), "file_name": file_name},
+                    context=audit_context,
+                )
+                record_failure_audit_event(
+                    self.session, event_type="DATASET_UPLOADED", object_type="DATASET",
+                    object_id=None, message=str(exc), metadata={"file_name": file_name},
+                    context=audit_context,
+                )
+            raise
+        except Exception as exc:
+            if self.session is not None:
+                record_failure_audit_event(
+                    self.session, event_type="DATASET_UPLOADED", object_type="DATASET",
+                    object_id=None, message=str(exc), metadata={"file_name": file_name},
+                    context=audit_context,
+                )
             raise
 
         assert artifact is not None

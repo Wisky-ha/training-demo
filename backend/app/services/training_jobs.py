@@ -45,6 +45,7 @@ from ..schemas.training_jobs import TrainingJobCreate
 from ..storage import ArtifactNotFoundError, ArtifactType, FileStorageService
 from .model_baseline import ModelBaselineService
 from .model_evaluation import ModelEvaluationError, ModelEvaluationService
+from .audit_events import AuditContext, record_audit_event, record_failure_audit_event
 from .preprocessing import PreprocessingError, PreprocessingService
 from .training_executor import TrainingScriptExecutor
 
@@ -163,7 +164,10 @@ class TrainingJobService:
             )
         return task
 
-    def create(self, request: TrainingJobCreate) -> TrainingJobORM:
+    def create(
+        self, request: TrainingJobCreate,
+        audit_context: AuditContext | None = None,
+    ) -> TrainingJobORM:
         """Validate all immutable inputs and commit a waiting job."""
 
         if self.session.scalar(select(ModelTypeORM.id).where(ModelTypeORM.code == request.model_type)) is None:
@@ -246,6 +250,13 @@ class TrainingJobService:
             config_summary=summary,
             logs=["PENDING：任务已创建，等待后台执行"],
         )
+        record_audit_event(
+            self.session, event_type="TRAINING_STARTED", object_type="TRAINING_JOB",
+            object_id=job.id, model_type=job.model_type, training_job_id=job.id,
+            message="训练任务已创建并等待后台执行",
+            metadata={"dataset_id": job.dataset_id, "train_script_id": job.train_script_id},
+            context=audit_context,
+        )
         self.session.commit()
         self._event(job.id)
         return job
@@ -253,7 +264,9 @@ class TrainingJobService:
     def get(self, job_id: str) -> TrainingJobORM | None:
         return self.repository.get(job_id)
 
-    def retry(self, job_id: str) -> TrainingJobORM:
+    def retry(
+        self, job_id: str, audit_context: AuditContext | None = None
+    ) -> TrainingJobORM:
         job = self.get(job_id)
         if job is None:
             raise TrainingJobNotFoundError(f"训练任务不存在：{job_id}")
@@ -291,11 +304,19 @@ class TrainingJobService:
         job.error_details = {}
         job.model_version_id = None
         job.logs = [*(job.logs or []), "PENDING：已提交失败重试"]
+        record_audit_event(
+            self.session, event_type="TRAINING_STARTED", object_type="TRAINING_JOB",
+            object_id=job.id, model_type=job.model_type, training_job_id=job.id,
+            message="失败训练任务已重新开始",
+            metadata={"retry": True}, context=audit_context,
+        )
         self.session.commit()
         self._event(job.id).clear()
         return job
 
-    def cancel(self, job_id: str) -> TrainingJobORM:
+    def cancel(
+        self, job_id: str, audit_context: AuditContext | None = None
+    ) -> TrainingJobORM:
         job = self.get(job_id)
         if job is None:
             raise TrainingJobNotFoundError(f"训练任务不存在：{job_id}")
@@ -310,6 +331,11 @@ class TrainingJobService:
             job.stage_started_at = now
             job.finished_at = now
             job.logs = [*(job.logs or []), "CANCELLED：任务在后台执行前已取消"]
+            record_audit_event(
+                self.session, event_type="TRAINING_CANCELLED", object_type="TRAINING_JOB",
+                object_id=job.id, model_type=job.model_type, training_job_id=job.id,
+                message="训练任务已取消", metadata={"phase": "pending"}, context=audit_context,
+            )
             self.session.commit()
         else:
             job.logs = [*(job.logs or []), "已收到取消请求，任务将在当前操作结束后停止"]
@@ -345,6 +371,7 @@ class TrainingJobService:
         message: str,
         error_code: str = "TRAINING_JOB_FAILED",
         details: dict[str, Any] | None = None,
+        audit_context: AuditContext | None = None,
     ) -> None:
         self.session.rollback()
         job = self.repository.get(job_id)
@@ -367,6 +394,18 @@ class TrainingJobService:
             entries.append(f"异常详情：{safe_details}")
         job.logs = entries
         self.session.commit()
+        record_failure_audit_event(
+            self.session, event_type="TRAINING_FAILED", object_type="TRAINING_JOB",
+            object_id=job.id, model_type=job.model_type, training_job_id=job.id,
+            message=message, metadata={"error_code": error_code, **safe_details},
+            context=audit_context,
+        )
+        if error_code.startswith("EVALUATION"):
+            record_failure_audit_event(
+                self.session, event_type="EVALUATION_COMPLETED", object_type="TRAINING_JOB",
+                object_id=job.id, model_type=job.model_type, training_job_id=job.id,
+                message=message, metadata={"error_code": error_code}, context=audit_context,
+            )
 
     def _discard_candidate(self, version_id: str) -> None:
         """Compensate a draft row and file if a later stage aborts."""
@@ -381,7 +420,7 @@ class TrainingJobService:
         except Exception:
             self.session.rollback()
 
-    def _cancel_finish(self, job_id: str) -> None:
+    def _cancel_finish(self, job_id: str, audit_context: AuditContext | None = None) -> None:
         self.session.rollback()
         job = self.repository.get(job_id)
         if job is None or job.status is TrainingJobStatus.CANCELLED:
@@ -393,6 +432,11 @@ class TrainingJobService:
         job.stage_started_at = now
         job.finished_at = now
         job.logs = [*(job.logs or []), "CANCELLED：任务已取消，未生成模型版本"]
+        record_audit_event(
+            self.session, event_type="TRAINING_CANCELLED", object_type="TRAINING_JOB",
+            object_id=job.id, model_type=job.model_type, training_job_id=job.id,
+            message="训练任务已取消，未生成模型版本", context=audit_context,
+        )
         self.session.commit()
 
     @staticmethod
@@ -702,7 +746,10 @@ class TrainingJobService:
         self.session.flush()
         return version, evaluation, artifact.relative_path
 
-    def run(self, job_id: str, config: dict[str, Any] | None = None) -> None:
+    def run(
+        self, job_id: str, config: dict[str, Any] | None = None,
+        audit_context: AuditContext | None = None,
+    ) -> None:
         """Execute in a worker-owned session and persist a READY candidate."""
 
         job = self.repository.get(job_id)
@@ -785,11 +832,31 @@ class TrainingJobService:
             job.stage_started_at = self._now()
             job.finished_at = self._now()
             job.logs = [*(job.logs or []), f"SUCCEEDED：评估完成，模型已保存为 READY（{model_path}）"]
+            record_audit_event(
+                self.session, event_type="MODEL_SAVED", object_type="MODEL_VERSION",
+                object_id=version.id, model_type=version.model_type,
+                model_version_id=version.id, training_job_id=job.id,
+                message="训练产物已保存为 READY 模型版本",
+                metadata={"version": version.version, "model_path": model_path}, context=audit_context,
+            )
+            record_audit_event(
+                self.session, event_type="EVALUATION_COMPLETED", object_type="TRAINING_JOB",
+                object_id=job.id, model_type=version.model_type,
+                model_version_id=version.id, training_job_id=job.id,
+                message="候选模型与基线评估完成",
+                metadata={"sample_count": evaluation.get("sample_count")}, context=audit_context,
+            )
+            record_audit_event(
+                self.session, event_type="TRAINING_SUCCEEDED", object_type="TRAINING_JOB",
+                object_id=job.id, model_type=job.model_type, training_job_id=job.id,
+                model_version_id=version.id, message="训练任务成功完成",
+                metadata={"model_version_id": version.id}, context=audit_context,
+            )
             self.session.commit()
         except _CancellationRequested:
             if artifact_id:
                 self._discard_candidate(artifact_id)
-            self._cancel_finish(job_id)
+            self._cancel_finish(job_id, audit_context)
         except (TrainingJobError, PreprocessingError) as exc:
             if artifact_id:
                 self._discard_candidate(artifact_id)
@@ -797,7 +864,7 @@ class TrainingJobService:
             if getattr(exc, "task_id", None):
                 details["task_id"] = exc.task_id
             details.setdefault("exception_type", type(exc).__name__)
-            self._fail(job_id, str(exc), getattr(exc, "code", "TRAINING_JOB_FAILED"), details)
+            self._fail(job_id, str(exc), getattr(exc, "code", "TRAINING_JOB_FAILED"), details, audit_context)
         except Exception as exc:
             if artifact_id:
                 self._discard_candidate(artifact_id)
@@ -806,16 +873,22 @@ class TrainingJobService:
                 job_id,
                 "训练任务执行失败",
                 "TRAINING_JOB_FAILED",
-                {"exception_type": type(exc).__name__},
+                {"exception_type": type(exc).__name__}, audit_context,
             )
         finally:
             self._remove_event(job_id)
 
     @staticmethod
-    def submit(executor: ThreadPoolExecutor, session_factory: Any, job_id: str, config: dict[str, Any] | None, settings: Settings) -> None:
+    def submit(
+        executor: ThreadPoolExecutor, session_factory: Any, job_id: str,
+        config: dict[str, Any] | None, settings: Settings,
+        audit_context: AuditContext | None = None,
+    ) -> None:
         def worker() -> None:
             with session_factory() as session:
-                TrainingJobService(session, settings=settings).run(job_id, config=config)
+                TrainingJobService(session, settings=settings).run(
+                    job_id, config=config, audit_context=audit_context
+                )
         executor.submit(worker)
 
     @classmethod

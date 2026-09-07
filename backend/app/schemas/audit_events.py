@@ -20,7 +20,7 @@ class AuditEventResponse(BaseModel):
     occurred_at: datetime
     event_type: str
     object_type: str
-    object_id: ResourceId
+    object_id: ResourceId | None
     model_type: ModelType | None
     model_version_id: ResourceId | None
     training_job_id: ResourceId | None

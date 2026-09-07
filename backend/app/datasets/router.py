@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..db.session import SessionLocal, get_session
 from ..schemas.dataset_split import DatasetSplitRequest, DatasetSplitResponse
+from ..services.audit_events import context_from_request
 from ..services.dataset_split import (
     DatasetSplitError,
     DatasetSplitNotFoundError,
@@ -87,6 +88,7 @@ async def upload_dataset(
             file.filename or "",
             content,
             content_type=file.content_type,
+            audit_context=context_from_request(request),
         )
     except CSVParseError as exc:
         return _validation_error(exc)
@@ -134,6 +136,7 @@ def split_dataset(
         split = service.split(
             dataset_id,
             preprocessing_task_id=body.preprocessing_task_id if body else None,
+            audit_context=context_from_request(request),
         )
     except DatasetSplitError as exc:
         raise _split_error(exc) from exc

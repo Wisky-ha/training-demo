@@ -42,6 +42,7 @@ from ..schemas.preprocessing import (
 )
 from ..storage import ArtifactNotFoundError, ArtifactType, FileStorageService
 from ..datasets.service import DatasetService
+from .audit_events import AuditContext, record_audit_event, record_failure_audit_event
 
 
 class PreprocessingError(ValueError):
@@ -417,13 +418,42 @@ class PreprocessingService:
                     f"预处理结果字段包含无法使用的数值：{column}", "PREPROCESS_VALUES_INVALID"
                 )
 
-    def _set_stage(self, task: PreprocessingTaskORM, stage: PreprocessingStage, message: str) -> None:
+    def _set_stage(
+        self, task: PreprocessingTaskORM, stage: PreprocessingStage, message: str,
+        audit_context: AuditContext | None = None,
+    ) -> None:
         task.stage = stage
         task.stage_started_at = _now()
         task.logs = [*task.logs, message]
+        if stage is PreprocessingStage.DATA_READING and task.status is PreprocessingTaskStatus.RUNNING:
+            record_audit_event(
+                self.session, event_type="PREPROCESS_STARTED", object_type="PREPROCESSING_TASK",
+                object_id=task.id, model_type=task.model_type,
+                metadata={"dataset_id": task.dataset_id, "preprocess_used": task.preprocess_used},
+                message="预处理任务开始执行", context=audit_context,
+            )
         self.session.commit()
 
-    def create_and_execute(self, request: PreprocessingTaskCreate) -> PreprocessingTaskORM:
+    def create_and_execute(
+        self, request: PreprocessingTaskCreate,
+        audit_context: AuditContext | None = None,
+    ) -> PreprocessingTaskORM:
+        try:
+            return self._create_and_execute(request, audit_context)
+        except PreprocessingError as exc:
+            if not exc.task_id:
+                record_failure_audit_event(
+                    self.session, event_type="PREPROCESS_FAILED", object_type="PREPROCESSING_TASK",
+                    object_id=None, model_type=request.model_type,
+                    message=str(exc), metadata={"error_code": exc.code},
+                    context=audit_context,
+                )
+            raise
+
+    def _create_and_execute(
+        self, request: PreprocessingTaskCreate,
+        audit_context: AuditContext | None = None,
+    ) -> PreprocessingTaskORM:
         dataset = self.session.get(DatasetORM, request.dataset_id)
         if dataset is None:
             raise PreprocessingError("数据集不存在", "DATASET_NOT_FOUND")
@@ -443,9 +473,11 @@ class PreprocessingService:
             logs=["等待执行"],
         )
         self.session.commit()
-        return self.execute(task.id)
+        return self.execute(task.id, audit_context=audit_context)
 
-    def execute(self, task_id: str) -> PreprocessingTaskORM:
+    def execute(
+        self, task_id: str, audit_context: AuditContext | None = None
+    ) -> PreprocessingTaskORM:
         task = self.repository.get(task_id)
         if task is None:
             raise PreprocessingNotFoundError(f"预处理任务不存在：{task_id}")
@@ -453,7 +485,7 @@ class PreprocessingService:
             task.status = PreprocessingTaskStatus.RUNNING
             task.started_at = _now()
             self.session.commit()
-            self._set_stage(task, PreprocessingStage.DATA_READING, "数据读取")
+            self._set_stage(task, PreprocessingStage.DATA_READING, "数据读取", audit_context)
             dataset = self.session.get(DatasetORM, task.dataset_id)
             if dataset is None:
                 raise PreprocessingError("数据集不存在", "DATASET_NOT_FOUND")
@@ -463,7 +495,7 @@ class PreprocessingService:
             task.input_summary = _frame_summary(frame)
             self.session.commit()
 
-            self._set_stage(task, PreprocessingStage.PREPROCESSING, "执行预处理")
+            self._set_stage(task, PreprocessingStage.PREPROCESSING, "执行预处理", audit_context)
             if not task.preprocess_used:
                 output = frame.copy(deep=True)
                 task.logs = [*task.logs, "未使用预处理，后续使用原始特征"]
@@ -496,7 +528,7 @@ class PreprocessingService:
                     "checksum_sha256": artifact.checksum_sha256,
                 }
 
-            self._set_stage(task, PreprocessingStage.VALIDATING, "结果校验")
+            self._set_stage(task, PreprocessingStage.VALIDATING, "结果校验", audit_context)
             self._validate_output(output, frame, dataset)
             task.output_row_count = len(output)
             task.output_columns = [str(column) for column in output.columns]
@@ -506,6 +538,14 @@ class PreprocessingService:
             task.finished_at = _now()
             task.logs = [*task.logs, "完成：可进入数据集划分"]
             task.status = task.status if task.status is PreprocessingTaskStatus.SKIPPED else PreprocessingTaskStatus.SUCCEEDED
+            event_type = "PREPROCESS_SKIPPED" if task.status is PreprocessingTaskStatus.SKIPPED else "PREPROCESS_SUCCEEDED"
+            record_audit_event(
+                self.session, event_type=event_type, object_type="PREPROCESSING_TASK",
+                object_id=task.id, model_type=task.model_type,
+                metadata={"dataset_id": task.dataset_id, "output_row_count": task.output_row_count},
+                message=("未使用预处理，使用原始数据" if task.status is PreprocessingTaskStatus.SKIPPED else "预处理执行成功"),
+                context=audit_context,
+            )
             self.session.commit()
             return task
         except Exception as exc:
@@ -538,6 +578,16 @@ class PreprocessingService:
                 failed.preprocessor_path = None
                 failed.preprocessor_state = None
                 self.session.commit()
+            record_failure_audit_event(
+                self.session, event_type="PREPROCESS_FAILED", object_type="PREPROCESSING_TASK",
+                object_id=task_id, model_type=failed.model_type if failed is not None else None,
+                message=message,
+                metadata={
+                    "error_code": getattr(exc, "code", "PREPROCESS_FAILED"),
+                    "dataset_id": failed.dataset_id if failed is not None else None,
+                },
+                context=audit_context,
+            )
             if isinstance(exc, PreprocessingError):
                 exc.task_id = task_id
                 raise

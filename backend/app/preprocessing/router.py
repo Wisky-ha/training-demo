@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from ..db.session import get_session
+from ..services.audit_events import context_from_request, record_failure_audit_event
 from ..schemas.preprocessing import (
     PreprocessingTaskCreate,
     PreprocessingTaskResponse,
@@ -60,7 +61,7 @@ def create_preprocessing_task(
 
     service = _service(request, session)
     try:
-        task = service.create_and_execute(request_body)
+        task = service.create_and_execute(request_body, audit_context=context_from_request(request))
     except PreprocessingNotFoundError as exc:
         raise _error(exc, not_found=True) from exc
     except PreprocessingError as exc:
@@ -76,8 +77,13 @@ def execute_preprocessing_task(
 ) -> dict[str, Any]:
     service = _service(request, session)
     try:
-        task = service.execute(task_id)
+        task = service.execute(task_id, audit_context=context_from_request(request))
     except PreprocessingNotFoundError as exc:
+        record_failure_audit_event(
+            session, event_type="PREPROCESS_FAILED", object_type="PREPROCESSING_TASK",
+            object_id=task_id, message=str(exc), metadata={"error_code": exc.code},
+            context=context_from_request(request),
+        )
         raise _error(exc, not_found=True) from exc
     except PreprocessingError as exc:
         raise _error(exc) from exc

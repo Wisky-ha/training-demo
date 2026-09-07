@@ -29,6 +29,7 @@ from ..domain.enums import AlertStatus, HealthStatus, ModelType, ModelVersionSta
 from ..schemas.models import AbnormalRequest, ModelSaveRequest
 from ..storage import ArtifactNotFoundError, ArtifactType, FileStorageService
 from .model_baseline import ModelBaselineService
+from .audit_events import AuditContext, record_audit_event
 
 
 class ModelLifecycleError(ValueError):
@@ -147,7 +148,10 @@ class ModelLifecycleService:
         from ..db.repositories import ModelVersionRepository
         return ModelVersionRepository(session).next_version(model_type)
 
-    def save(self, request: ModelSaveRequest) -> ModelVersionORM:
+    def save(
+        self, request: ModelSaveRequest,
+        audit_context: AuditContext | None = None,
+    ) -> ModelVersionORM:
         """Register metadata and optionally persist a model file as a READY row."""
         self._model_type(request.model_type)
         version_id = request.id or str(uuid4())
@@ -195,6 +199,13 @@ class ModelLifecycleService:
             )
             self.session.add(model)
             self.session.flush()
+            record_audit_event(
+                self.session, event_type="MODEL_SAVED", object_type="MODEL_VERSION",
+                object_id=model.id, model_type=model.model_type, model_version_id=model.id,
+                training_job_id=model.training_job_id,
+                message="模型版本保存成功", metadata={"version": model.version, "status": model.status.value},
+                context=audit_context,
+            )
             self.session.commit()
             return model
         except IntegrityError as exc:
@@ -256,7 +267,10 @@ class ModelLifecycleService:
     # Compatibility name for integrations that used the old helper.
     _active_alert = _open_alert
 
-    def _resolve_alerts(self, model_type: ModelType, now: datetime) -> None:
+    def _resolve_alerts(
+        self, model_type: ModelType, now: datetime,
+        audit_context: AuditContext | None = None,
+    ) -> None:
         # Acknowledgement records operator handling, not recovery. Both open
         # states close only after a successful publication.
         for alert in self.session.scalars(select(ModelAlertORM).where(
@@ -265,6 +279,12 @@ class ModelLifecycleService:
         )):
             alert.status = AlertStatus.RESOLVED
             alert.resolved_at = now
+            record_audit_event(
+                self.session, event_type="ALERT_RESOLVED", object_type="ALERT",
+                object_id=alert.id, model_type=alert.model_type,
+                model_version_id=alert.model_version_id,
+                message="告警已随成功发布解决", context=audit_context,
+            )
         record = self._model_type(model_type)
         record.alert_status = AlertStatus.RESOLVED
 
@@ -436,7 +456,8 @@ class ModelLifecycleService:
         self._validate_input_schema(version)
 
     def publish(self, version_id: str, *, confirmed: bool = False,
-                message: str | None = None, idempotency_key: str | None = None) -> tuple[ModelVersionORM, PublishRecordORM | None]:
+                message: str | None = None, idempotency_key: str | None = None,
+                audit_context: AuditContext | None = None) -> tuple[ModelVersionORM, PublishRecordORM | None]:
         if not confirmed:
             raise ModelLifecycleError("发布生产模型需要二次确认", "PUBLISH_CONFIRMATION_REQUIRED")
         version = self.get(version_id)
@@ -481,13 +502,19 @@ class ModelLifecycleService:
             version.published_at = now
             record.current_version_id = version.id
             record.alert_status = AlertStatus.RESOLVED
-            self._resolve_alerts(version.model_type, now)
+            self._resolve_alerts(version.model_type, now, audit_context)
             release = PublishRecordORM(
                 model_version_id=version.id, published_version=version.version,
                 previous_current_version_id=previous_id, published_at=now, message=message,
                 idempotency_key=idempotency_key,
             )
             self.session.add(release)
+            record_audit_event(
+                self.session, event_type="MODEL_PUBLISHED", object_type="MODEL_VERSION",
+                object_id=version.id, model_type=version.model_type, model_version_id=version.id,
+                message="模型版本已发布到生产", metadata={"previous_current_version_id": previous_id},
+                context=audit_context,
+            )
             try:
                 self.session.commit()
             except IntegrityError as exc:
@@ -495,7 +522,9 @@ class ModelLifecycleService:
                 raise ModelLifecycleError("模型发布并发冲突，请重试", "MODEL_LIFECYCLE_CONFLICT") from exc
             return version, release
 
-    def retire(self, version_id: str) -> ModelVersionORM:
+    def retire(
+        self, version_id: str, audit_context: AuditContext | None = None
+    ) -> ModelVersionORM:
         version = self.get(version_id)
         if version is None:
             raise ModelNotFoundError()
@@ -511,14 +540,33 @@ class ModelLifecycleService:
                 self._clear_current(record)
             version.is_current = False
             version.status = ModelVersionStatus.RETIRED
+            record_audit_event(
+                self.session, event_type="MODEL_OFFLINED", object_type="MODEL_VERSION",
+                object_id=version.id, model_type=version.model_type, model_version_id=version.id,
+                message="模型版本已下线", context=audit_context,
+            )
             self.session.commit()
             return version
 
     def rollback(self, model_id: str, *, target_version_id: str | None = None,
-                 target_version: str | None = None, reason: str = "手动回滚") -> tuple[RollbackRecordORM, ModelVersionORM]:
+                 target_version: str | None = None, reason: str = "手动回滚",
+                 audit_context: AuditContext | None = None) -> tuple[RollbackRecordORM, ModelVersionORM]:
         requested = self.get(model_id)
         if requested is None:
             raise ModelNotFoundError()
+        # This marker is intentionally independent: a later validation or
+        # commit failure must not erase the fact that rollback was requested.
+        # End the read transaction first; this is also safe for SQLite's
+        # StaticPool used by the in-memory test application.
+        self.session.rollback()
+        from .audit_events import record_audit_event
+        record_audit_event(
+            self.session, event_type="MODEL_ROLLBACK_STARTED", object_type="MODEL_VERSION",
+            object_id=requested.id, model_type=requested.model_type,
+            model_version_id=requested.id, message="已开始模型回滚",
+            metadata={"target_version_id": target_version_id, "target_version": target_version, "reason": reason},
+            context=audit_context, independent=True,
+        )
         with self._lock_for(requested.model_type):
             record = self._lock_type(requested.model_type)
             current = self._current(record)
@@ -569,6 +617,13 @@ class ModelLifecycleService:
                 created_at=now, finished_at=now,
             )
             self.session.add(rollback)
+            self.session.flush()
+            record_audit_event(
+                self.session, event_type="MODEL_ROLLBACK_SUCCEEDED", object_type="MODEL_VERSION",
+                object_id=target.id, model_type=requested.model_type,
+                model_version_id=target.id, message="模型回滚成功",
+                metadata={"rollback_id": rollback.id, "rollback_from": source_id}, context=audit_context,
+            )
             try:
                 self.session.commit()
             except IntegrityError as exc:
@@ -594,6 +649,7 @@ class ModelLifecycleService:
         *,
         abnormal: bool = True,
         no_backup_code: str = "NO_HEALTHY_BACKUP",
+        audit_context: AuditContext | None = None,
     ) -> tuple[ModelAlertORM | None, RollbackRecordORM | None, ModelVersionORM | None]:
         """Mark one version unhealthy and atomically fail over its model type.
 
@@ -641,6 +697,7 @@ class ModelLifecycleService:
                     raise ModelLifecycleError("该版本状态不可标记异常", "ABNORMAL_STATE_INVALID")
                 version.health_status = HealthStatus.ABNORMAL
                 alert = self._open_alert(version.model_type)
+                alert_created = alert is None
                 if alert is None:
                     alert = ModelAlertORM(
                         model_type=version.model_type, model_version_id=version.id,
@@ -649,6 +706,7 @@ class ModelLifecycleService:
                         status=AlertStatus.ACTIVE, created_at=now,
                     )
                     self.session.add(alert)
+                    self.session.flush()
                 else:
                     alert.model_version_id = version.id
                     alert.reason = reason
@@ -657,6 +715,19 @@ class ModelLifecycleService:
                     alert.status = AlertStatus.ACTIVE
                     alert.acknowledged_at = None
                 record.alert_status = AlertStatus.ACTIVE
+                if alert_created:
+                    record_audit_event(
+                        self.session, event_type="ALERT_CREATED", object_type="ALERT",
+                        object_id=alert.id, model_type=alert.model_type,
+                        model_version_id=alert.model_version_id, message="模型异常告警已创建",
+                        metadata={"reason": reason}, context=audit_context,
+                    )
+                record_audit_event(
+                    self.session, event_type="MODEL_MARKED_ABNORMAL", object_type="MODEL_VERSION",
+                    object_id=version.id, model_type=version.model_type,
+                    model_version_id=version.id, message="模型已标记为异常",
+                    metadata={"reason": reason, "historical": True}, context=audit_context,
+                )
                 self.session.commit()
                 return alert, None, current or version
 
@@ -689,6 +760,7 @@ class ModelLifecycleService:
             if version.status is ModelVersionStatus.PUBLISHED:
                 version.status = ModelVersionStatus.RETIRED
             alert = self._open_alert(version.model_type)
+            alert_created = alert is None
             if alert is None:
                 alert = ModelAlertORM(
                     model_type=version.model_type, model_version_id=version.id,
@@ -705,21 +777,53 @@ class ModelLifecycleService:
                 alert.status = AlertStatus.ACTIVE
                 alert.acknowledged_at = None
             record.alert_status = AlertStatus.ACTIVE
+            if alert_created:
+                record_audit_event(
+                    self.session, event_type="ALERT_CREATED", object_type="ALERT",
+                    object_id=alert.id, model_type=alert.model_type,
+                    model_version_id=alert.model_version_id, message="模型异常告警已创建",
+                    metadata={"reason": reason}, context=audit_context,
+                )
+            record_audit_event(
+                self.session, event_type="MODEL_MARKED_ABNORMAL", object_type="MODEL_VERSION",
+                object_id=version.id, model_type=version.model_type,
+                model_version_id=version.id, message="模型已标记为异常",
+                metadata={"reason": reason}, context=audit_context,
+            )
             rollback = RollbackRecordORM(
                 model_type=version.model_type, rollback_from=version.id,
                 rollback_to=target.id if target else None, alert=alert,
                 reason=f"自动切换：{reason}", status=RollbackStatus.PENDING, created_at=now,
             )
             self.session.add(rollback)
+            self.session.flush()
+            record_audit_event(
+                self.session, event_type="MODEL_ROLLBACK_STARTED", object_type="MODEL_VERSION",
+                object_id=version.id, model_type=version.model_type,
+                model_version_id=version.id, message="异常切换回滚已开始",
+                metadata={"rollback_id": rollback.id, "rollback_to": target.id if target else None}, context=audit_context,
+            )
             if target is not None:
                 self._make_current(record, target)
                 rollback.status = RollbackStatus.SUCCEEDED
                 rollback.finished_at = self._now()
                 alert.rollback_to = target.id
+                record_audit_event(
+                    self.session, event_type="MODEL_ROLLBACK_SUCCEEDED", object_type="MODEL_VERSION",
+                    object_id=target.id, model_type=version.model_type,
+                    model_version_id=target.id, message="异常模型已自动切换成功",
+                    metadata={"rollback_id": rollback.id}, context=audit_context,
+                )
                 self.session.commit()
                 return alert, rollback, target
             rollback.status = RollbackStatus.FAILED
             rollback.finished_at = self._now()
+            record_audit_event(
+                self.session, event_type="MODEL_ROLLBACK_FAILED", object_type="MODEL_VERSION",
+                object_id=version.id, model_type=version.model_type,
+                model_version_id=version.id, result="FAILED", message="未找到可用的健康回滚版本",
+                metadata={"rollback_id": rollback.id}, context=audit_context,
+            )
             self.session.commit()
             raise NoHealthyRollbackError(
                 "当前模型异常，未找到健康且已发布的回滚版本；告警仍保持 ACTIVE",
@@ -733,6 +837,7 @@ class ModelLifecycleService:
         *,
         abnormal: bool = True,
         reason: str = "健康检查异常",
+        audit_context: AuditContext | None = None,
     ) -> tuple[ModelAlertORM | None, RollbackRecordORM | None, ModelVersionORM | None]:
         """Type/version service boundary used by API and external adapters."""
         try:
@@ -740,7 +845,9 @@ class ModelLifecycleService:
         except (TypeError, ValueError) as exc:
             raise ModelLifecycleError("模型类型无效", "MODEL_TYPE_INVALID") from exc
         version = self._resolve_model_version(code, model_version)
-        return self.mark_abnormal(version.id, reason, abnormal=abnormal)
+        return self.mark_abnormal(
+            version.id, reason, abnormal=abnormal, audit_context=audit_context
+        )
 
     def alerts(self, *, model_type: ModelType | None = None,
                status: AlertStatus | None = None,
@@ -766,7 +873,9 @@ class ModelLifecycleService:
             )
         return list(self.session.scalars(statement.order_by(ModelAlertORM.created_at.desc(), ModelAlertORM.id.desc())).all())
 
-    def acknowledge_alert(self, alert_id: str) -> ModelAlertORM:
+    def acknowledge_alert(
+        self, alert_id: str, audit_context: AuditContext | None = None
+    ) -> ModelAlertORM:
         alert = self.session.get(ModelAlertORM, alert_id)
         if alert is None:
             raise ModelLifecycleError("告警不存在", "ALERT_NOT_FOUND")
@@ -780,6 +889,12 @@ class ModelLifecycleService:
         model_type = self.session.get(ModelTypeORM, alert.model_type)
         if model_type is not None:
             model_type.alert_status = AlertStatus.ACKNOWLEDGED
+        record_audit_event(
+            self.session, event_type="ALERT_ACKNOWLEDGED", object_type="ALERT",
+            object_id=alert.id, model_type=alert.model_type,
+            model_version_id=alert.model_version_id, message="告警已确认处理",
+            context=audit_context,
+        )
         # Older SQLite CHECK constraints only know ACTIVE/RESOLVED. Keep the
         # timestamp as the compatibility source of truth if that write is
         # rejected; response/query adapters still expose ACKNOWLEDGED.
@@ -795,6 +910,12 @@ class ModelLifecycleService:
             model_type = self.session.get(ModelTypeORM, alert.model_type)
             if model_type is not None:
                 model_type.alert_status = AlertStatus.ACTIVE
+            record_audit_event(
+                self.session, event_type="ALERT_ACKNOWLEDGED", object_type="ALERT",
+                object_id=alert.id, model_type=alert.model_type,
+                model_version_id=alert.model_version_id, message="告警已确认处理",
+                context=audit_context,
+            )
             self.session.commit()
         return alert
 

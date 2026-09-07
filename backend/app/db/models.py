@@ -790,7 +790,7 @@ class AuditEventORM(Base):
     )
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     object_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    object_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    object_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     model_type: Mapped[ModelType | None] = mapped_column(
         _enum_column(ModelType),
         ForeignKey("model_types.code", ondelete="SET NULL"),

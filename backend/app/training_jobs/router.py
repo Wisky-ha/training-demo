@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from ..db.session import get_session
+from ..services.audit_events import context_from_request, record_failure_audit_event
 from ..schemas.training_jobs import EvaluationResponse, TrainingJobCreate, TrainingJobLogsResponse, TrainingJobResponse
 from ..services.training_jobs import TrainingJobError, TrainingJobNotFoundError, TrainingJobService
 
@@ -46,13 +47,34 @@ def _response(job: Any) -> dict[str, Any]:
 def create_training_job(body: TrainingJobCreate, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     service = _service(request, session)
     try:
-        job = service.create(body)
+        job = service.create(body, audit_context=context_from_request(request))
         executor = getattr(request.app.state, "training_job_executor", None)
         if executor is None:
             raise TrainingJobError("后台任务执行器不可用", "TRAINING_EXECUTOR_UNAVAILABLE")
-        TrainingJobService.submit(executor, request.app.state.session_factory, job.id, body.config, service.settings)
+        TrainingJobService.submit(
+            executor, request.app.state.session_factory, job.id, body.config,
+            service.settings, context_from_request(request),
+        )
     except TrainingJobError as exc:
+        record_failure_audit_event(
+            session, event_type="TRAINING_FAILED", object_type="TRAINING_JOB",
+            object_id=job.id if "job" in locals() else None,
+            model_type=body.model_type,
+            training_job_id=job.id if "job" in locals() else None,
+            message=str(exc),
+            metadata={"error_code": exc.code}, context=context_from_request(request),
+        )
         raise _error(exc) from exc
+    except Exception:
+        record_failure_audit_event(
+            session, event_type="TRAINING_FAILED", object_type="TRAINING_JOB",
+            object_id=job.id if "job" in locals() else None,
+            model_type=body.model_type,
+            training_job_id=job.id if "job" in locals() else None,
+            message="训练任务提交失败",
+            metadata={"error_code": "TRAINING_SUBMIT_FAILED"}, context=context_from_request(request),
+        )
+        raise
     return _response(job)
 
 
@@ -76,13 +98,29 @@ def get_training_job_logs(job_id: str, request: Request, session: Session = Depe
 def retry_training_job(job_id: str, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     service = _service(request, session)
     try:
-        job = service.retry(job_id)
+        job = service.retry(job_id, audit_context=context_from_request(request))
         executor = getattr(request.app.state, "training_job_executor", None)
         if executor is None:
             raise TrainingJobError("后台任务执行器不可用", "TRAINING_EXECUTOR_UNAVAILABLE")
-        TrainingJobService.submit(executor, request.app.state.session_factory, job.id, job.config, service.settings)
+        TrainingJobService.submit(
+            executor, request.app.state.session_factory, job.id, job.config,
+            service.settings, context_from_request(request),
+        )
     except TrainingJobError as exc:
+        record_failure_audit_event(
+            session, event_type="TRAINING_FAILED", object_type="TRAINING_JOB",
+            object_id=job_id, training_job_id=job_id, message=str(exc),
+            metadata={"error_code": exc.code},
+            context=context_from_request(request),
+        )
         raise _error(exc) from exc
+    except Exception:
+        record_failure_audit_event(
+            session, event_type="TRAINING_FAILED", object_type="TRAINING_JOB",
+            object_id=job_id, training_job_id=job_id, message="训练任务重试提交失败",
+            metadata={"error_code": "TRAINING_RETRY_SUBMIT_FAILED"}, context=context_from_request(request),
+        )
+        raise
     return _response(job)
 
 
@@ -101,8 +139,14 @@ def get_training_evaluation(job_id: str, request: Request, session: Session = De
 @router.post("/{job_id}/cancel", response_model=TrainingJobResponse)
 def cancel_training_job(job_id: str, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     try:
-        job = _service(request, session).cancel(job_id)
+        job = _service(request, session).cancel(job_id, context_from_request(request))
     except TrainingJobError as exc:
+        record_failure_audit_event(
+            session, event_type="TRAINING_CANCELLED", object_type="TRAINING_JOB",
+            object_id=job_id, training_job_id=job_id, message=str(exc),
+            metadata={"error_code": exc.code},
+            context=context_from_request(request),
+        )
         raise _error(exc) from exc
     return _response(job)
 

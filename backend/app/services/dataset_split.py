@@ -16,6 +16,7 @@ from ..db.repositories import DatasetSplitRepository
 from ..domain.enums import PreprocessingStage, PreprocessingTaskStatus, SplitStrategy
 from ..schemas.dataset_split import DatasetSplitResponse
 from .preprocessing import PreprocessingError, PreprocessingService
+from .audit_events import AuditContext, record_audit_event, record_failure_audit_event
 from ..datasets.service import DatasetService
 
 
@@ -172,7 +173,25 @@ class DatasetSplitService:
             raise DatasetSplitNotFoundError("数据集不存在", "DATASET_NOT_FOUND", dataset_id=dataset_id)
         return self.repository.get_for_dataset(dataset_id)
 
-    def split(self, dataset_id: str, preprocessing_task_id: str | None = None) -> DatasetSplitORM:
+    def split(
+        self, dataset_id: str, preprocessing_task_id: str | None = None,
+        audit_context: AuditContext | None = None,
+    ) -> DatasetSplitORM:
+        try:
+            return self._split(dataset_id, preprocessing_task_id, audit_context)
+        except DatasetSplitError as exc:
+            record_failure_audit_event(
+                self.session, event_type="SPLIT_CREATED", object_type="DATASET_SPLIT",
+                object_id=dataset_id, message=str(exc),
+                metadata={"dataset_id": dataset_id, "error_code": exc.code},
+                context=audit_context,
+            )
+            raise
+
+    def _split(
+        self, dataset_id: str, preprocessing_task_id: str | None = None,
+        audit_context: AuditContext | None = None,
+    ) -> DatasetSplitORM:
         dataset = self.session.get(DatasetORM, dataset_id)
         if dataset is None:
             raise DatasetSplitNotFoundError("数据集不存在", "DATASET_NOT_FOUND", dataset_id=dataset_id)
@@ -224,6 +243,14 @@ class DatasetSplitService:
                 "数据集划分结果无法持久化",
                 "DATASET_SPLIT_PERSIST_FAILED",
             ) from exc
+        record_audit_event(
+            self.session,
+            event_type="SPLIT_CREATED", object_type="DATASET_SPLIT", object_id=split.id,
+            model_version_id=None, message="数据集按时间顺序完成 80/20 划分",
+            metadata={"dataset_id": dataset_id, "data_source": data_source,
+                      "train_row_count": train_count, "test_row_count": test_count},
+            context=audit_context,
+        )
         self.session.commit()
         return split
 
