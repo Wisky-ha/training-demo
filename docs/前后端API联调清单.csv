@@ -1,0 +1,49 @@
+﻿分类,HTTP方法,API地址,前端用法(Client方法),入参(前端发送),成功出参(契约),后端实现现状,差异与备注,建议
+匹配,GET,/api/health,getHealth(),无,HealthResponse{status,environment?,app_name?},/health与/api/health均返回{status:ok,environment,app_name},已一致,无
+匹配,POST,/api/datasets/upload,uploadDataset(file,options),multipart file(必填)；前端另发model_type(见字段差异行),DatasetUploadResult{id,file_name,row_count,column_count,columns[],time_column,feature_columns[],target_column,time_parse,numeric_columns[],missing_values,preview_rows[],status,created_at},后端201返回相同核心字段并附file_path/file_size_bytes/checksum_sha256/file_storage等,核心字段一致；model_type被忽略,无
+匹配,GET,/api/datasets/{dataset_id}/split,getDatasetSplit(id),路径参数,dataset_id,DatasetSplitResult{id,dataset_id,split_strategy:time_ordered,split_ratio:0.8,test_ratio:0.2,行数,时间范围,平铺时间字段,created_at},后端200返回持久化划分；未划分404,一致,无
+匹配,POST,/api/datasets/{dataset_id}/split,splitDataset(id,preprocessingTaskId?),JSON{preprocessing_task_id?},DatasetSplitResult同上,后端201创建；重复划分409,一致,无
+匹配,POST,/api/preprocessing-tasks,createPreprocessingTask(),JSON{model_type,dataset_id,preprocess_script_id?,mode:use/skip?,skip?,config?},PreprocessTask{id,dataset_id,preprocess_script_id,preprocess_used,preprocess_status,status,stage,progress_stage,logs[],error_message,config,行数摘要,columns,created_at等},后端201同步执行并返回最终状态,字段一致；status值为大写枚举(见字段差异行),无
+匹配,GET,/api/preprocessing-tasks/{task_id},getPreprocessingTask(id),路径参数task_id,PreprocessTask同上,后端200；不存在404,一致,无
+匹配,GET,/api/scripts,listScripts(params),query{model_type?,script_type?,status?,page?,page_size?},PaginatedResponse{items:ScriptContract[],pagination},后端返回{items,pagination}；默认status=ENABLED,一致(脚本状态大写ENABLED/DISABLED前端已兼容),无
+匹配,GET,/api/scripts/{script_id},getScript(id),路径参数script_id,ScriptContract{id,name,script_type,version,source_code,supported_model_types[],status,created_at},后端200；不存在404,一致,无
+匹配,POST,/api/scripts/upload,uploadScript(input),multipart file/name/script_type/supported_model_types(JSON数组)/version?,ScriptContract同上,后端201；重复版本409,一致,无
+匹配,POST,/api/scripts/{script_id}/enable,enableScript(id),无,ScriptContract,后端200仅改启用状态,一致,无
+匹配,POST,/api/scripts/{script_id}/disable,disableScript(id),无,ScriptContract,后端200仅改停用状态,一致,无
+匹配,POST,/api/training-jobs,createTrainingJob(input),JSON{model_type,dataset_id,train_script_id,preprocess_script_id?,preprocessing_task_id?,config?},TrainingJob{id,model_type,dataset_id,preprocess_script_id,train_script_id,split_ratio:0.8,test_ratio:0.2,status,progress_stage,current_stage,stage,logs[],error_message,config,model_version_id,created_at等},后端201创建并后台执行,一致,无
+匹配,GET,/api/training-jobs/{job_id},getTrainingJob(id),路径参数job_id,TrainingJob同上,后端200；不存在404,一致,无
+匹配,GET,/api/training-jobs/{job_id}/logs,getTrainingJobLogs(id,params?),路径参数job_id；前端可选query{since?,limit?},TrainingLogsResponse{job_id,items:字符串数组},后端仅接收路径参数并返回全量logs,端点匹配；since/limit无效(见字段差异行),无
+匹配,POST,/api/training-jobs/{job_id}/retry,retryTrainingJob(id),无,TrainingJob,后端200仅FAILED可重试；其他409,一致,无
+匹配,GET,/api/training-jobs/{job_id}/evaluation,getTrainingJobEvaluation(id),无,ModelEvaluation{metrics,chart_data[],error_data[],model_comparison等},后端成功任务200；未完成409,一致(前端兼容time/timestamp、predicted/candidate_prediction),无
+匹配,GET,/api/models,listModels(params),query{model_type?,status?,page?,page_size?},ModelVersionSummary[],后端返回数组；支持model_type/status/health_status,端点匹配；page/page_size无效；health_status前端未声明(见字段差异行),无
+匹配,GET,/api/models/{model_id},getModel(id),路径参数model_id,ModelVersionDetail(含input_schema等),后端200返回ModelVersionResponse；不存在404,一致,无
+匹配,POST,/api/models/{model_id}/save,saveModel(id,input),JSON{model_type,status:DRAFT|READY,training_job_id?,train_script_id?,preprocess_script_id?,preprocess_used?,time_column?,feature_columns?,target_column?,metrics?},ModelVersionSummary,后端200补全草稿；基线不可改409,一致,无
+匹配,POST,/api/models/{model_id}/publish,publishModel(id,input),JSON{confirm?/confirmed?/confirmation?,message?/reason?,idempotency_key?},PublishModelResponse{operation:model.publish,model,record?},后端200必须确认否则400；三个确认拼写均兼容,一致,无
+匹配,POST,/api/models/{model_id}/offline,offlineModel(id),无,LifecycleOperationResponse{operation,model},后端200下线为RETIRED不删制品,一致,无
+匹配,POST,/api/models/{model_id}/rollback,rollbackModel(id,input),JSON{target_version_id?,reason?},LifecycleOperationResponse{operation,model,rollback?},后端200未传目标时按路径id为目标；无健康备份409,一致,无
+匹配,GET,/api/models/{model_id}/publish-records,getModelPublishRecords(id),路径参数model_id,PublishRecord[],后端返回发布审计数组(含idempotency_key),一致,无
+匹配,GET,/api/models/{model_id}/rollback-records,getModelRollbackRecords(id),路径参数model_id,RollbackRecord[],后端返回list[RollbackResponse]{id,model_type,rollback_from,rollback_to,alert_id,reason,status,created_at,finished_at},一致,无
+匹配,POST,/api/models/{model_id}/abnormal,markModelAbnormal(id,reason),JSON{reason?,abnormal?},LifecycleOperationResponse{operation,model,rollback?,alert?},后端200按版本ID标记异常；无健康备份409,一致,无
+匹配,GET,/api/alerts,listAlerts(params),query{model_type?,active_only?},ModelAlert[],后端返回数组；支持model_type/active_only,端点匹配；page/page_size/status无效(见字段差异行),无
+前端有-后端缺,GET,/api/model-types,listModelTypes(),无,ModelTypeContract[],后端README明确无此路由(模型类型由初始化写入)会404,前端契约存在；页面实际用本地常量MODEL_TYPE_CODES未触发,删除前端方法或后端补接口
+前端有-后端缺,POST,/api/predict,predict(input),JSON{model_type,model_version?,data:对象数组},PredictionResponse{success,model_type,model_version,preprocess_used,predictions[]},后端实际是POST /api/mcp/predict(另兼容/mcp/predict)；/api/predict不存在会404,路径错配属P0运行时故障,前端改为mcp/predict
+后端有-前端未用,POST,/api/preprocessing-tasks/{task_id}/execute,无Client方法,无,PreprocessTaskResponse,后端200重新执行任务,前端无对应调用,按需封装
+后端有-前端未用,POST,/api/preprocessing-tasks/{task_id}/transform,无Client方法,JSON{dataset_id必填,config?},PreprocessTransformResponse{task_id,preprocess_used,data_source,row_count,columns,summary},后端200仅复用已fit状态不再次fit,前端无对应调用,按需封装
+后端有-前端未用,POST,/api/training-jobs/{job_id}/cancel,无Client方法,无,TrainingJobResponse,后端200取消训练终态重复幂等,页面仅轮询无取消按钮,如需取消按钮再封装
+后端有-前端未用,DELETE,/api/training-jobs/{job_id},无Client方法,无,TrainingJobResponse,cancel的兼容别名(不在OpenAPI schema),隐藏别名,建议不对外暴露
+后端有-前端未用,POST,/api/models,无Client方法,JSON ModelSaveRequest{model_type,status?,version?,model_content_base64?,制品与输入schema等},ModelVersionResponse 201,后端可独立新建模型版本,前端只用{id}/save补全草稿,按需封装
+后端有-前端未用,POST,/api/models/abnormal,无Client方法,JSON{model_type,model_version,abnormal?,reason?},LifecycleOperationResponse{operation:abnormal,model,rollback,alert},后端按类型+版本号标记异常并自动切换,前端只有按ID的{id}/abnormal,按需封装(注意响应结构见字段差异行)
+后端有-前端未用,GET,/api/alerts/{alert_id},无Client方法,路径参数alert_id,ModelAlertResponse,后端200；不存在404,前端只查列表,按需封装
+后端有-前端未用,POST,/api/alerts/{alert_id}/acknowledge,无Client方法,无,ModelAlertResponse,后端200确认不解除告警；/ack与/confirm为隐藏别名,前端无确认操作,按需封装
+后端有-前端未用,POST,/api/mcp/predict,无正确Client方法,JSON{model_type,model_version?,data:对象数组},{success,model_type,model_version,preprocess_used,predictions[]},后端HTTP transport已实现,前端predict方法路径错误未对齐(见前端有-后端缺行),修正前端路径后即接通
+后端有-前端未用,POST,/api/mcp/mark_model_abnormal,无Client方法,JSON{model_type,model_version,abnormal?,reason?},{success,model_type,model_version,current_model_version,alert,rollback,rollback_triggered,alert_cleared},后端HTTP transport已实现,前端无MCP异常标记方法,MCP页面联调时封装
+后端有-前端未用,POST,/api/models/{model_id}/unpublish,无Client方法,无,LifecycleOperationResponse,offline兼容别名(不在OpenAPI schema),隐藏别名建议不用,不对外暴露
+后端有-前端未用,POST,/api/models/{model_id}/retire,无Client方法,无,LifecycleOperationResponse,offline兼容别名(不在OpenAPI schema),隐藏别名建议不用,不对外暴露
+后端有-前端未用,DELETE,/api/models/{model_id},无Client方法,无,LifecycleOperationResponse,offline兼容别名(不在OpenAPI schema),隐藏别名建议不用,不对外暴露
+字段差异,POST,/api/datasets/upload,uploadDataset(),multipart额外字段model_type,后端上传接口只声明file参数,model_type不会被保存或参与校验；前端DatasetUploadOptions.model_type语义落空,二选一：后端保存关联或前端移除该字段
+字段差异,GET,/api/training-jobs/{job_id}/logs,getTrainingJobLogs(),query since/limit,后端只接收job_id路径参数,增量与条数限制静默失效始终返回全量,后端补参数或前端移除
+字段差异,GET,/api/models,listModels(),query page/page_size,后端无分页参数返回数组,分页契约不成立；后端另有health_status前端未声明,明确不分页(删参数)或后端实现分页
+字段差异,GET,/api/alerts,listAlerts(),query page/page_size/status,后端只支持model_type/active_only,分页与状态过滤静默失效返回全部,同上：删参数或后端实现
+字段差异,无独立地址,前端类型contracts.ts,PreprocessTask.status声明为小写waiting等,后端PreprocessingTaskStatus实际返回大写WAITING/RUNNING/SUCCEEDED/SKIPPED/FAILED,页面用toLowerCase()兜底但TS契约不准确,前端类型补大写枚举或Client统一归一化
+字段差异,无独立地址,前端类型contracts.ts,PreprocessStage缺failed,后端PreprocessingStage包含failed阶段,失败阶段类型无法表达,前端类型补failed
+字段差异,POST,/api/models/abnormal,前端旧类型MarkModelAbnormalResponse,含current_model字段,后端实际返回LifecycleOperationResponse{operation,model,rollback,alert}无current_model,前端无方法使用该旧类型属潜在错配,统一为LifecycleOperationResponse或删除旧类型
