@@ -32,3 +32,8 @@
 - 完成时间：2026-09-07T14:19:11.089Z
 - verify：无
 - commit：未检测到新提交（worker 可能未按约定提交）
+<!-- step:2026-09-07T14-19-10-219Z:2 -->
+## 步骤 2：冻结统一合同模型：规范 model_type、资源 ID、READY/PUBLISHED/RETIRED/FAILED 生命周期、HEALTHY/ABNORMAL/UNKNOWN 健康状态及 ACTIVE/ACKNOWLEDGED/RESOLVED 告警状态。
+- 完成时间：2026-09-07T14:48:07.844Z
+- verify：无
+- commit：未检测到新提交（worker 可能未按约定提交）
