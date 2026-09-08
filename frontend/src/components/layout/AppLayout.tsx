@@ -6,6 +6,7 @@ const navigation = [
   { to: '/', label: '平台概览', icon: '⌂', end: true },
   { to: '/workflow', label: '训练工作流', icon: '◈' },
   { to: '/models', label: '模型版本', icon: '◫' },
+  { to: '/audit', label: '审计记录', icon: '▤' },
   { to: '/mcp', label: '服务说明', icon: '⌁' },
 ]
 
@@ -13,6 +14,7 @@ const pageNames: Record<string, string> = {
   '/': '平台概览',
   '/workflow': '训练工作流',
   '/models': '模型版本',
+  '/audit': '审计记录',
   '/mcp': '服务说明',
   '/404': '页面未找到',
 }

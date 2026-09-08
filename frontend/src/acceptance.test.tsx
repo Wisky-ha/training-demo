@@ -556,6 +556,23 @@ describe('workflow acceptance flows', () => {
   })
 })
 
+describe('audit route and navigation', () => {
+  it('registers /audit with the prototype navigation label and breadcrumb', async () => {
+    const listAuditEvents = vi.spyOn(apiClient, 'listAuditEvents').mockResolvedValue({
+      items: [], page: 1, page_size: 50, total: 0, has_next: false,
+    })
+
+    renderApp('/audit')
+
+    expect(await screen.findByRole('heading', { name: '审计记录' })).toBeTruthy()
+    const auditNav = screen.getByRole('link', { name: '审计记录' })
+    expect(auditNav.getAttribute('href')).toBe('/audit')
+    expect(auditNav.className).toContain('active')
+    expect(screen.getByText('工作台')).toBeTruthy()
+    expect(listAuditEvents).toHaveBeenCalledWith({ page: 1, page_size: 50 })
+  })
+})
+
 describe('model registry and MCP acceptance content', () => {
   it('renders version query content and loads version details', async () => {
     const model = baseModel({ id: 'model-v2', version: 'v2' })

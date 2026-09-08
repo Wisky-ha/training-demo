@@ -5,6 +5,7 @@ import { NotFoundPage } from './pages/NotFoundPage'
 import { McpPage } from './pages/McpPage'
 import { ModelVersionsPage } from './pages/ModelVersionsPage'
 import { WorkflowPage } from './pages/WorkflowPage'
+import { AuditPage } from './pages/AuditPage'
 
 function App() {
   return (
@@ -13,6 +14,7 @@ function App() {
         <Route index element={<HomePage />} />
         <Route path="workflow/:stepId?" element={<WorkflowPage />} />
         <Route path="models" element={<ModelVersionsPage />} />
+        <Route path="audit" element={<AuditPage />} />
         <Route path="mcp" element={<McpPage />} />
         <Route path="404" element={<NotFoundPage />} />
       </Route>
