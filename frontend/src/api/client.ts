@@ -21,11 +21,11 @@ import type {
   PaginatedResponse,
   PredictionRequest,
   PredictionResponse,
-  PublishModelRequest,
+  PublishModelInput,
   PublishModelResponse,
   PublishRecord,
   ModelSaveRequest,
-  RollbackModelRequest,
+  RollbackModelInput,
   RollbackRecord,
   ScriptContract,
   ScriptUploadInput,
@@ -206,13 +206,14 @@ function normalizeDetail(value: unknown): ModelVersionDetail | null {
     ...model,
     input_schema: isRecord(source.input_schema) ? source.input_schema as Record<string, JsonValue> : {},
     previous_healthy_version_id: model.previous_healthy_version_id ?? null,
-    evaluation: isRecord(source.evaluation) ? source.evaluation as ModelEvaluation : null,
+    evaluation: isRecord(source.evaluation) ? source.evaluation as unknown as ModelEvaluation : null,
   }
 }
 
 function normalizeAlert(value: unknown): ModelAlert | null {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.model_type !== 'string') return null
-  const status = String(value.status ?? 'ACTIVE').toUpperCase()
+  const status = String(value.status ?? '').toUpperCase()
+  if (status !== 'ACTIVE' && status !== 'ACKNOWLEDGED' && status !== 'RESOLVED') return null
   return {
     id: value.id,
     model_type: value.model_type as ModelAlert['model_type'],
@@ -220,7 +221,7 @@ function normalizeAlert(value: unknown): ModelAlert | null {
     reason: typeof value.reason === 'string' ? value.reason : '未提供异常原因',
     rollback_from: typeof value.rollback_from === 'string' ? value.rollback_from : null,
     rollback_to: typeof value.rollback_to === 'string' ? value.rollback_to : null,
-    status: status === 'ACTIVE' || status === 'ACKNOWLEDGED' || status === 'RESOLVED' ? status : null,
+    status,
     created_at: typeof value.created_at === 'string' ? value.created_at : '',
     acknowledged_at: typeof value.acknowledged_at === 'string' ? value.acknowledged_at : null,
     resolved_at: typeof value.resolved_at === 'string' ? value.resolved_at : null,
@@ -235,6 +236,8 @@ function normalizePublishRecord(value: unknown): PublishRecord | null {
     published_version: value.published_version,
     previous_current_version_id: typeof value.previous_current_version_id === 'string' ? value.previous_current_version_id : null,
     published_at: typeof value.published_at === 'string' ? value.published_at : '',
+    reason: typeof value.reason === 'string' ? value.reason : null,
+    idempotency_key: typeof value.idempotency_key === 'string' ? value.idempotency_key : null,
     message: typeof value.message === 'string' ? value.message : null,
   }
 }
@@ -243,6 +246,8 @@ function normalizeRollback(value: unknown): RollbackRecord | null {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.model_type !== 'string') return null
   const from = typeof value.rollback_from === 'string' ? value.rollback_from : typeof value.from_version_id === 'string' ? value.from_version_id : null
   const to = typeof value.rollback_to === 'string' ? value.rollback_to : typeof value.to_version_id === 'string' ? value.to_version_id : null
+  const status = typeof value.status === 'string' ? value.status.toUpperCase() : ''
+  if (status !== 'PENDING' && status !== 'SUCCEEDED' && status !== 'FAILED') return null
   return {
     id: value.id,
     model_type: value.model_type as RollbackRecord['model_type'],
@@ -252,7 +257,8 @@ function normalizeRollback(value: unknown): RollbackRecord | null {
     to_version_id: to,
     alert_id: typeof value.alert_id === 'string' ? value.alert_id : null,
     reason: typeof value.reason === 'string' ? value.reason : null,
-    status: typeof value.status === 'string' ? value.status.toUpperCase() as RollbackRecord['status'] : undefined,
+    idempotency_key: typeof value.idempotency_key === 'string' ? value.idempotency_key : null,
+    status,
     created_at: typeof value.created_at === 'string' ? value.created_at : '',
     finished_at: typeof value.finished_at === 'string' ? value.finished_at : null,
   }
@@ -450,7 +456,7 @@ export class ApiClient {
 
   publishModel(
     id: EntityId,
-    input: PublishModelRequest = {},
+    input: PublishModelInput = {},
   ): Promise<PublishModelResponse> {
     return this.postJson<unknown>(
       `models/${encodeURIComponent(id)}/publish`,
@@ -485,7 +491,7 @@ export class ApiClient {
   /** The backend accepts either a target id/version or an empty body (path target). */
   rollbackModel(
     id: EntityId,
-    input: RollbackModelRequest = {},
+    input: RollbackModelInput = {},
   ): Promise<LifecycleOperationResponse> {
     return this.postJson<unknown>(
       `models/${encodeURIComponent(id)}/rollback`,
