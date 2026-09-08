@@ -3,9 +3,10 @@ export {
   ApiError,
   DEFAULT_API_BASE_URL,
   apiClient,
+  createIdempotencyKey,
   resolveApiBaseUrl,
 } from './client'
-export type { ApiClientOptions, ApiResult, RequestOptions } from './client'
+export type { ApiClientOptions, ApiResult, CompatibleArrayResponse, RequestOptions } from './client'
 export {
   NOT_PROVIDED_TEXT,
   UNKNOWN,

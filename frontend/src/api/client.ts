@@ -2,6 +2,11 @@ import type {
   ApiErrorCode,
   ApiErrorResponse,
   ApiResponse,
+  AlertAcknowledgeRequest,
+  AlertAcknowledgeResponse,
+  AlertStatistics,
+  AuditEvent,
+  AuditEventsResponse,
   DatasetUploadOptions,
   DatasetUploadResult,
   DatasetSplitResult,
@@ -10,6 +15,7 @@ import type {
   HealthStatus,
   JsonValue,
   ListAlertsParams,
+  ListAuditEventsParams,
   ListModelsParams,
   ListScriptsParams,
   ModelAlert,
@@ -30,6 +36,7 @@ import type {
   ScriptContract,
   ScriptUploadInput,
   TrainingJob,
+  TrainingLogsParams,
   TrainingLogsResponse,
   CreateTrainingJobRequest,
   PreprocessTask,
@@ -114,15 +121,19 @@ function toErrorResponse(payload: unknown, status: number): ApiError {
     return new ApiError(payload.message, {
       status,
       code: payload.error_code,
-      details: payload.details,
+      details: payload.details ?? null,
     })
   }
 
   if (isRecord(payload)) {
+    // FastAPI raises HTTPException with ``detail={code, message, ...}``,
+    // whereas validation errors use a detail array. Keep the complete wire
+    // payload in details so callers never lose status/code/field information.
     const detail = isRecord(payload.detail) ? payload.detail : null
     const nestedError = isRecord(payload.error) ? payload.error : null
-    const message = (detail?.message ?? nestedError?.message ?? payload.detail)
-    const code = detail?.code ?? nestedError?.code
+    const message = detail?.message ?? nestedError?.message
+      ?? (typeof payload.detail === 'string' ? payload.detail : payload.message)
+    const code = detail?.code ?? nestedError?.code ?? payload.error_code ?? payload.code
     if (typeof message === 'string') {
       return new ApiError(message, {
         status,
@@ -139,6 +150,13 @@ function toErrorResponse(payload: unknown, status: number): ApiError {
   })
 }
 
+/** Create a stable request key when a page does not provide one. */
+export function createIdempotencyKey(prefix = 'model-operation'): string {
+  const randomUuid = globalThis.crypto?.randomUUID
+  if (typeof randomUuid === 'function') return `${prefix}:${randomUuid.call(globalThis.crypto)}`
+  return `${prefix}:${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
+
 const MODEL_STATUSES: Exclude<ModelVersionSummary['status'], null>[] = [
   'DRAFT', 'TRAINING', 'READY', 'PUBLISHED', 'RETIRED', 'FAILED',
 ]
@@ -150,10 +168,10 @@ function normalizeModel(value: unknown): ModelVersionSummary | null {
   }
   const rawStatus = typeof value.status === 'string' ? value.status.toUpperCase() : null
   const isCurrent = value.is_current === true
-  // ABNORMAL was historically mixed into lifecycle. Keep parsing it, but
-  // expose the lifecycle that can be inferred from the current pointer.
+  // ABNORMAL was historically mixed into lifecycle. It is health evidence,
+  // not enough evidence to invent a lifecycle state.
   const status = rawStatus === 'ABNORMAL'
-    ? (isCurrent ? 'PUBLISHED' : 'RETIRED')
+    ? null
     : rawStatus as ModelVersionSummary['status']
   const rawHealth = typeof value.health_status === 'string'
     ? value.health_status.toUpperCase()
@@ -207,6 +225,18 @@ function normalizeDetail(value: unknown): ModelVersionDetail | null {
     input_schema: isRecord(source.input_schema) ? source.input_schema as Record<string, JsonValue> : {},
     previous_healthy_version_id: model.previous_healthy_version_id ?? null,
     evaluation: isRecord(source.evaluation) ? source.evaluation as unknown as ModelEvaluation : null,
+  }
+}
+
+function normalizeAlertStatistics(value: unknown): AlertStatistics | null {
+  if (!isRecord(value)) return null
+  const values = ['total', 'active', 'acknowledged', 'resolved']
+  if (!values.every((key) => typeof value[key] === 'number' && Number.isFinite(value[key]))) return null
+  return {
+    total: value.total as number,
+    active: value.active as number,
+    acknowledged: value.acknowledged as number,
+    resolved: value.resolved as number,
   }
 }
 
@@ -273,6 +303,58 @@ function normalizeOperation(value: unknown, fallbackOperation: string): Lifecycl
   const rollback = rollbackSource === null || rollbackSource === undefined ? null : normalizeRollback(rollbackSource)
   const alert = source.alert === null || source.alert === undefined ? null : normalizeAlert(source.alert)
   return { operation, model, rollback, alert }
+}
+
+function normalizeAuditEvent(value: unknown): AuditEvent | null {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.occurred_at !== 'string'
+    || typeof value.event_type !== 'string' || typeof value.object_type !== 'string'
+    || typeof value.result !== 'string') return null
+  return {
+    id: value.id,
+    occurred_at: value.occurred_at,
+    event_type: value.event_type,
+    object_type: value.object_type,
+    object_id: typeof value.object_id === 'string' ? value.object_id : null,
+    model_type: typeof value.model_type === 'string' ? value.model_type as AuditEvent['model_type'] : null,
+    model_version_id: typeof value.model_version_id === 'string' ? value.model_version_id : null,
+    training_job_id: typeof value.training_job_id === 'string' ? value.training_job_id : null,
+    operator_type: typeof value.operator_type === 'string' ? value.operator_type : null,
+    operator_id: typeof value.operator_id === 'string' ? value.operator_id : null,
+    operator_name: typeof value.operator_name === 'string' ? value.operator_name : null,
+    result: value.result,
+    message: typeof value.message === 'string' ? value.message : null,
+    request_id: typeof value.request_id === 'string' ? value.request_id : null,
+    correlation_id: typeof value.correlation_id === 'string' ? value.correlation_id : null,
+    metadata: isRecord(value.metadata) ? value.metadata as AuditEvent['metadata'] : {},
+  }
+}
+
+export type CompatibleArrayResponse<T> = T[] & {
+  items?: T[]
+  page?: number | null
+  page_size?: number | null
+  total?: number
+  has_next?: boolean
+  next_cursor?: string | null
+  statistics?: AlertStatistics
+}
+
+function compatibleArrayResponse<T>(rows: T[], payload: unknown): CompatibleArrayResponse<T> {
+  const result = rows as CompatibleArrayResponse<T>
+  if (isRecord(payload) && Array.isArray(payload.items)) {
+    // Non-enumerable properties keep old ``array.map`` consumers and their
+    // equality expectations intact while exposing page metadata to newer UI.
+    Object.defineProperties(result, {
+      items: { value: result, enumerable: false },
+      page: { value: typeof payload.page === 'number' ? payload.page : null, enumerable: false },
+      page_size: { value: typeof payload.page_size === 'number' ? payload.page_size : null, enumerable: false },
+      total: { value: typeof payload.total === 'number' ? payload.total : rows.length, enumerable: false },
+      has_next: { value: payload.has_next === true, enumerable: false },
+      next_cursor: { value: typeof payload.next_cursor === 'string' ? payload.next_cursor : null, enumerable: false },
+      statistics: { value: normalizeAlertStatistics(payload.statistics) ?? undefined, enumerable: false },
+    })
+  }
+  return result
 }
 
 export class ApiClient {
@@ -361,14 +443,24 @@ export class ApiClient {
     return this.request<T>(path, 'POST', formData, options)
   }
 
-  getHealth(options?: RequestOptions): Promise<HealthResponse> {
-    return this.get<HealthResponse>('health', options)
+  async getHealth(options?: RequestOptions): Promise<HealthResponse> {
+    // /health is the declared contract. The fallback is only for deployments
+    // that expose the legacy /api/health alias; it also avoids /api/api/health.
+    try {
+      return await this.get<HealthResponse>('../health', options)
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        return this.get<HealthResponse>('health', options)
+      }
+      throw error
+    }
   }
 
-  uploadDataset(file: File, options: DatasetUploadOptions = {}): Promise<DatasetUploadResult> {
+  uploadDataset(file: File, _options: DatasetUploadOptions = {}): Promise<DatasetUploadResult> {
+    // model_type belongs to the workflow context. The upload OpenAPI contract
+    // declares only the multipart ``file`` field.
     const formData = new FormData()
     formData.append('file', file)
-    if (options.model_type) formData.append('model_type', options.model_type)
     return this.postForm<DatasetUploadResult>('datasets/upload', formData)
   }
 
@@ -436,13 +528,14 @@ export class ApiClient {
     return this.get<TrainingJob>(`training-jobs/${encodeURIComponent(id)}`)
   }
 
-  getTrainingJobLogs(
-    id: EntityId,
-    params?: { since?: string; limit?: number },
-  ): Promise<TrainingLogsResponse> {
+  getTrainingJobLogs(id: EntityId, params?: TrainingLogsParams): Promise<TrainingLogsResponse> {
     return this.get<TrainingLogsResponse>(`training-jobs/${encodeURIComponent(id)}/logs`, {
-      query: params,
+      query: params as RequestOptions['query'],
     })
+  }
+
+  cancelTrainingJob(id: EntityId): Promise<TrainingJob> {
+    return this.postJson<TrainingJob>(`training-jobs/${encodeURIComponent(id)}/cancel`)
   }
 
   getTrainingJobEvaluation(id: EntityId): Promise<ModelEvaluation> {
@@ -456,11 +549,22 @@ export class ApiClient {
 
   publishModel(
     id: EntityId,
-    input: PublishModelInput = {},
+    input: PublishModelInput = { confirmed: false },
   ): Promise<PublishModelResponse> {
+    const compatibility = input as PublishModelInput & {
+      confirm?: boolean
+      confirmation?: boolean
+      message?: string | null
+    }
+    const reason = input.reason ?? compatibility.message ?? null
+    const body = {
+      confirmed: input.confirmed ?? compatibility.confirm ?? compatibility.confirmation ?? false,
+      reason,
+      idempotency_key: input.idempotency_key ?? createIdempotencyKey('publish'),
+    }
     return this.postJson<unknown>(
       `models/${encodeURIComponent(id)}/publish`,
-      { ...input, confirmed: input.confirmed ?? input.confirm ?? false },
+      body,
     ).then((payload) => {
       const operation = normalizeOperation(payload, 'publish')
       const source = isRecord(payload) ? payload : {}
@@ -469,14 +573,15 @@ export class ApiClient {
     })
   }
 
-  listModels(params?: ListModelsParams): Promise<ModelVersionSummary[]> {
+  listModels(params?: ListModelsParams): Promise<CompatibleArrayResponse<ModelVersionSummary>> {
     return this.get<unknown>('models', {
       query: params as RequestOptions['query'],
     }).then((payload) => {
       const rows = Array.isArray(payload)
         ? payload
         : isRecord(payload) && Array.isArray(payload.items) ? payload.items : []
-      return rows.map(normalizeModel).filter((item): item is ModelVersionSummary => item !== null)
+      const normalized = rows.map(normalizeModel).filter((item): item is ModelVersionSummary => item !== null)
+      return compatibleArrayResponse(normalized, payload)
     })
   }
 
@@ -488,14 +593,39 @@ export class ApiClient {
     })
   }
 
-  /** The backend accepts either a target id/version or an empty body (path target). */
+  /** Compatibility aliases are adapted here; the path id is never a target. */
   rollbackModel(
     id: EntityId,
     input: RollbackModelInput = {},
   ): Promise<LifecycleOperationResponse> {
+    const compatibility = input as RollbackModelInput & {
+      version_id?: EntityId
+      version?: string
+    }
+    const targetVersionId = input.target_version_id ?? compatibility.version_id ?? compatibility.version
+    const reason = input.reason?.trim()
+    if (!targetVersionId) {
+      return Promise.reject(new ApiError('回滚必须显式提供 target_version_id', {
+        status: 400,
+        code: 'ROLLBACK_TARGET_REQUIRED',
+        details: { field: 'target_version_id' },
+      }))
+    }
+    if (!reason) {
+      return Promise.reject(new ApiError('回滚必须提供 reason', {
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        details: { field: 'reason' },
+      }))
+    }
+    const body = {
+      target_version_id: targetVersionId,
+      reason,
+      idempotency_key: input.idempotency_key ?? createIdempotencyKey('rollback'),
+    }
     return this.postJson<unknown>(
       `models/${encodeURIComponent(id)}/rollback`,
-      input,
+      body,
     ).then((payload) => normalizeOperation(payload, 'rollback'))
   }
 
@@ -520,19 +650,70 @@ export class ApiClient {
   }
 
   /** Uses the implemented lifecycle endpoint, rather than the undocumented MCP alias. */
-  markModelAbnormal(id: EntityId, reason = '健康检查异常'): Promise<LifecycleOperationResponse> {
+  markModelAbnormal(id: EntityId, reason: string): Promise<LifecycleOperationResponse> {
+    if (!reason.trim()) {
+      return Promise.reject(new ApiError('标记异常必须提供 reason', {
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        details: { field: 'reason' },
+      }))
+    }
     return this.postJson<unknown>(`models/${encodeURIComponent(id)}/abnormal`, { reason })
       .then((payload) => normalizeOperation(payload, 'abnormal'))
   }
 
-  listAlerts(params?: ListAlertsParams): Promise<ModelAlert[]> {
+  getAlert(id: EntityId): Promise<ModelAlert> {
+    return this.get<unknown>(`alerts/${encodeURIComponent(id)}`).then((payload) => {
+      const alert = normalizeAlert(payload)
+      if (!alert) throw new ApiError('API 返回的告警数据无效', { status: 200, code: 'INVALID_RESPONSE' })
+      return alert
+    })
+  }
+
+  acknowledgeAlert(id: EntityId, input: AlertAcknowledgeRequest = { confirmed: true }): Promise<AlertAcknowledgeResponse> {
+    const body = { confirmed: input.confirmed ?? true }
+    return this.postJson<unknown>(`alerts/${encodeURIComponent(id)}/acknowledge`, body).then((payload) => {
+      const source = isRecord(payload) ? payload : {}
+      const alert = normalizeAlert(source)
+      const statistics = normalizeAlertStatistics(source.statistics)
+      if (!alert || !statistics) throw new ApiError('API 返回的告警数据无效', { status: 200, code: 'INVALID_RESPONSE' })
+      return { ...alert, statistics }
+    })
+  }
+
+  listAlerts(params?: ListAlertsParams): Promise<CompatibleArrayResponse<ModelAlert>> {
     return this.get<unknown>('alerts', {
       query: params as RequestOptions['query'],
     }).then((payload) => {
+      // The server uses the canonical page envelope when pagination is
+      // requested and retains an array for old no-parameter callers.
       const rows = Array.isArray(payload)
         ? payload
         : isRecord(payload) && Array.isArray(payload.items) ? payload.items : []
-      return rows.map(normalizeAlert).filter((item): item is ModelAlert => item !== null)
+      const normalized = rows.map(normalizeAlert).filter((item): item is ModelAlert => item !== null)
+      return compatibleArrayResponse(normalized, payload)
+    })
+  }
+
+  listAuditEvents(params?: ListAuditEventsParams): Promise<AuditEventsResponse> {
+    return this.get<unknown>('audit-events', {
+      query: params as RequestOptions['query'],
+    }).then((payload) => {
+      const source = isRecord(payload) ? payload : {}
+      const items = Array.isArray(payload)
+        ? payload
+        : Array.isArray(source.items) ? source.items : []
+      const page = typeof source.page === 'number' ? source.page : params?.page ?? 1
+      const pageSize = typeof source.page_size === 'number' ? source.page_size : params?.page_size ?? items.length
+      const total = typeof source.total === 'number' ? source.total : items.length
+      const hasNext = typeof source.has_next === 'boolean' ? source.has_next : page * pageSize < total
+      return {
+        items: items.map(normalizeAuditEvent).filter((item): item is AuditEvent => item !== null),
+        page,
+        page_size: pageSize,
+        total,
+        has_next: hasNext,
+      }
     })
   }
 
