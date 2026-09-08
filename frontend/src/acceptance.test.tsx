@@ -566,11 +566,11 @@ describe('model registry and MCP acceptance content', () => {
     render(<MemoryRouter><ModelVersionsPage /></MemoryRouter>)
 
     expect(await screen.findByRole('heading', { name: '电力负荷预测 · 版本列表' })).toBeTruthy()
-    expect(screen.getByText('v2')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: /^v2/ }))
+    expect(screen.getByRole('button', { name: 'v2' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'v2' }))
     expect(await screen.findByRole('heading', { name: 'v2' })).toBeTruthy()
-    expect(screen.getByText('输入与预处理')).toBeTruthy()
-    expect(screen.getByText('暂无与此版本关联的回滚记录。')).toBeTruthy()
+    expect(screen.getByText('预处理')).toBeTruthy()
+    expect(screen.getByText('回滚基线')).toBeTruthy()
   })
 
   it('documents MCP default-version and error handling rules without claiming an endpoint', () => {
