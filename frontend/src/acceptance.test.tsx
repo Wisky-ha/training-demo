@@ -173,6 +173,20 @@ describe('workflow acceptance flows', () => {
     expect(upload).not.toHaveBeenCalled()
   })
 
+  it('renders upload metadata and the empty field-summary state from the response', async () => {
+    useAppStore.getState().setWorkflowContext({ modelType: 'electric_load' })
+    const dataset = datasetFixture({ columns: [], column_count: 0, file_size_bytes: 0, row_count: 0, time_range: { start: '', end: '' }, validation: { valid: false, errors: [], warnings: [], checks: {} } })
+    vi.spyOn(apiClient, 'uploadDataset').mockResolvedValue(dataset)
+    vi.spyOn(apiClient, 'getDataset').mockResolvedValue(dataset)
+    renderApp('/workflow/upload')
+
+    fireEvent.change(screen.getByLabelText(/拖拽 CSV 文件到这里/), { target: { files: [new File([''], 'empty.csv', { type: 'text/csv' })] } })
+    expect(await screen.findAllByText('load.csv')).not.toHaveLength(0)
+    expect(screen.getAllByText('dataset-1').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('失败').length).toBeGreaterThan(0)
+    expect(screen.getByText('暂无字段摘要')).toBeTruthy()
+  })
+
   it('shows the explicit unused-preprocessing state when skip is selected', async () => {
     seedWorkflow({
       modelType: 'electric_load',
@@ -187,6 +201,19 @@ describe('workflow acceptance flows', () => {
 
     expect(await screen.findByText('未使用预处理，后续使用原始特征')).toBeTruthy()
     expect(screen.getByText(/预处理.*已跳过/)).toBeTruthy()
+  })
+
+  it('uploads and selects an ENABLED preprocessor script', async () => {
+    seedWorkflow({ modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture() })
+    const script: ScriptContract = { ...trainerFixture, id: 'preprocess-1', name: '清洗脚本', script_type: 'preprocessor' }
+    vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [], pagination: { page: 1, page_size: 20, total: 0, total_pages: 0 } })
+    const upload = vi.spyOn(apiClient, 'uploadScript').mockResolvedValue(script)
+    mockWorkflowReads({ job: trainingFixture({ model_version_id: null }) })
+    renderApp('/workflow/preprocess')
+
+    fireEvent.change(screen.getByLabelText('上传预处理脚本'), { target: { files: [new File(['print(1)'], 'clean.py')] } })
+    expect(await screen.findByText('清洗脚本')).toBeTruthy()
+    expect(upload).toHaveBeenCalledWith(expect.objectContaining({ script_type: 'preprocessor', supported_model_types: ['electric_load'] }))
   })
 
   it('shows failed-training retry guidance and submits a retry', async () => {
@@ -206,6 +233,27 @@ describe('workflow acceptance flows', () => {
     await waitFor(() => expect(retry).toHaveBeenCalledWith('job-1'))
   })
 
+  it('merges incremental training logs and can cancel a running job', async () => {
+    const runningJob = trainingFixture({ status: 'RUNNING', model_version_id: null, current_stage: '训练中', logs: [] })
+    const logRead = vi.spyOn(apiClient, 'getTrainingJobLogs').mockResolvedValue({
+      job_id: 'job-1', items: [{ timestamp: '2026-01-01T00:00:01Z', level: 'info', message: '第一条日志', stage: 'training' }], next_cursor: 'cursor-2',
+    })
+    vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [trainerFixture], pagination: { page: 1, page_size: 20, total: 1, total_pages: 1 } })
+    vi.spyOn(apiClient, 'getTrainingJob').mockResolvedValue(runningJob)
+    const cancel = vi.spyOn(apiClient, 'cancelTrainingJob').mockResolvedValue({ ...runningJob, status: 'CANCELLED' })
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(), preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(),
+      splitId: 'split-1', split: splitFixture(), trainScriptId: 'trainer-1', trainingJobId: 'job-1', trainingJob: runningJob,
+    })
+    mockWorkflowReads({ job: runningJob })
+    renderApp('/workflow/train')
+
+    expect(await screen.findByText('第一条日志')).toBeTruthy()
+    expect(logRead).toHaveBeenCalledWith('job-1', expect.objectContaining({ limit: 100 }))
+    fireEvent.click(screen.getByRole('button', { name: '取消训练' }))
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith('job-1'))
+  })
+
   it('enables the evaluation transition after training succeeds with a model version ID', async () => {
     const succeededJob = trainingFixture()
     seedWorkflow({
@@ -221,6 +269,18 @@ describe('workflow acceptance flows', () => {
     expect(next.disabled).toBe(false)
     fireEvent.click(next)
     expect(await screen.findByRole('heading', { name: '评估结果与模型对比' })).toBeTruthy()
+  })
+
+  it('shows chart empty states when evaluation data is empty', async () => {
+    const succeededJob = trainingFixture()
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(), preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(),
+      splitId: 'split-1', split: splitFixture(), trainScriptId: 'trainer-1', trainingJobId: 'job-1', trainingJob: succeededJob,
+      modelVersionId: 'model-1', modelVersion: baseModel(),
+    })
+    mockWorkflowReads({ job: succeededJob, evaluation: evaluationFixture({ chart_data: [], error_data: [] }) })
+    renderApp('/workflow/evaluate')
+    expect(await screen.findAllByText('暂无可绘制的有效数据')).toHaveLength(2)
   })
 
   it('blocks evaluation when a succeeded training job has no model_version_id', async () => {
@@ -240,7 +300,7 @@ describe('workflow acceptance flows', () => {
     expect(evaluationRead).not.toHaveBeenCalled()
   })
 
-  it('requires browser confirmation before publishing a candidate', async () => {
+  it('requires a reason in a custom confirmation dialog before publishing', async () => {
     const succeededJob = trainingFixture()
     seedWorkflow({
       modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
@@ -249,14 +309,36 @@ describe('workflow acceptance flows', () => {
       modelVersionId: 'model-1', modelVersion: baseModel(), evaluation: evaluationFixture(),
     })
     mockWorkflowReads({ job: succeededJob })
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
     const publish = vi.spyOn(apiClient, 'publishModel')
     renderApp('/workflow/publish')
 
-    fireEvent.click(await screen.findByRole('button', { name: '发布模型' }))
-
-    expect(confirm).toHaveBeenCalledWith('发布后将成为当前生产模型，是否确认发布？')
+    fireEvent.click(await screen.findByRole('button', { name: '发布' }))
+    expect(await screen.findByRole('dialog')).toBeTruthy()
     expect(publish).not.toHaveBeenCalled()
+    expect((screen.getByRole('button', { name: '确认发布' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('saves a candidate as READY and publishes with a required reason', async () => {
+    const succeededJob = trainingFixture()
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(), preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(),
+      splitId: 'split-1', split: splitFixture(), trainScriptId: 'trainer-1', trainingJobId: 'job-1', trainingJob: succeededJob,
+      modelVersionId: 'model-1', modelVersion: baseModel({ status: 'DRAFT' }), evaluation: evaluationFixture(),
+    })
+    mockWorkflowReads({ job: succeededJob, model: baseModel({ status: 'DRAFT' }) })
+    vi.spyOn(apiClient, 'listModels').mockResolvedValue([])
+    const save = vi.spyOn(apiClient, 'saveModel').mockResolvedValue(baseModel({ status: 'DRAFT' }))
+    const publish = vi.spyOn(apiClient, 'publishModel').mockResolvedValue({ operation: 'publish', model: baseModel({ status: 'PUBLISHED', is_current: true }) })
+    renderApp('/workflow/publish')
+
+    fireEvent.click(await screen.findByRole('button', { name: '保存候选版本' }))
+    await waitFor(() => expect(save).toHaveBeenCalledWith('model-1', expect.objectContaining({ status: 'READY' })))
+    fireEvent.click(await screen.findByRole('button', { name: '发布' }))
+    fireEvent.change(screen.getByLabelText('发布原因'), { target: { value: '验证通过，切换生产版本' } })
+    fireEvent.click(screen.getByRole('button', { name: '确认发布' }))
+    await waitFor(() => expect(publish).toHaveBeenCalledWith('model-1', expect.objectContaining({
+      confirmed: true, reason: '验证通过，切换生产版本', idempotency_key: expect.any(String),
+    })))
   })
 
   it('persists workflow resource IDs and currentStep instead of treating objects as durable state', () => {

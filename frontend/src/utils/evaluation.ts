@@ -51,6 +51,14 @@ function chartRows(evaluation: ModelEvaluation): unknown[] {
   return []
 }
 
+function errorRows(evaluation: ModelEvaluation): unknown[] {
+  if (Array.isArray(evaluation.error_data) && evaluation.error_data.length) return evaluation.error_data
+  const chartRecord = record(evaluation.chart_data)
+  if (chartRecord && Array.isArray(chartRecord.error_series)) return chartRecord.error_series
+  return []
+}
+
+
 function evenSample<T>(items: T[], limit: number): T[] {
   if (items.length <= limit) return items
   const indexes = new Set<number>()
@@ -96,6 +104,35 @@ export function normalizeEvaluationData(evaluation: ModelEvaluation): Evaluation
     points: rendered,
     sourceCount: Math.max(sourceCount, points.length),
     serverSampled,
+    clientSampled: rendered.length < points.length,
+    invalidCount,
+  }
+}
+
+/** Uses the endpoint's dedicated error_data series when it is available. */
+export function normalizeEvaluationErrorData(evaluation: ModelEvaluation): EvaluationViewData {
+  const rows = errorRows(evaluation)
+  let invalidCount = 0
+  const points = rows.flatMap((value) => {
+    const row = record(value)
+    if (!row) {
+      invalidCount += 1
+      return []
+    }
+    const timestamp = stringValue(row.timestamp ?? row.time)
+    const error = numberValue(row.error ?? row.candidate_error ?? row.candidateError)
+    if (!timestamp || error === null) {
+      invalidCount += 1
+      return []
+    }
+    return [{ timestamp, actual: 0, candidate: 0, baseline: null, error, percentageError: numberValue(row.percentage_error) }]
+  })
+  const sourceCount = numberValue(evaluation.chart_total_count) ?? rows.length
+  const rendered = evenSample(points, MAX_RENDER_POINTS)
+  return {
+    points: rendered,
+    sourceCount: Math.max(sourceCount, points.length),
+    serverSampled: Boolean(evaluation.chart_sampled) || sourceCount > rows.length,
     clientSampled: rendered.length < points.length,
     invalidCount,
   }

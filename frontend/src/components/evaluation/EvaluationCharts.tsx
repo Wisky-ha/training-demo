@@ -7,6 +7,7 @@ import {
   metricDelta,
   metricLabel,
   normalizeEvaluationData,
+  normalizeEvaluationErrorData,
   type EvaluationModelResult,
   type NormalizedEvaluationPoint,
 } from '../../utils/evaluation'
@@ -161,6 +162,7 @@ function comparisonRows(candidate: EvaluationModelResult | null, production: Eva
 
 export function EvaluationDashboard({ evaluation }: { evaluation: ModelEvaluation }) {
   const data = useMemo(() => normalizeEvaluationData(evaluation), [evaluation])
+  const errorData = useMemo(() => normalizeEvaluationErrorData(evaluation), [evaluation])
   const metrics = evaluationMetrics(evaluation)
   const { candidate, production } = useMemo(() => evaluationModels(evaluation), [evaluation])
   const rows = comparisonRows(candidate, production)
@@ -171,7 +173,7 @@ export function EvaluationDashboard({ evaluation }: { evaluation: ModelEvaluatio
     { key: 'candidate', label: '新模型预测', color: COLORS.candidate, values: data.points.map((point) => point.candidate) },
   ]
   if (data.points.some((point) => point.baseline !== null)) lineSeries.push({ key: 'baseline', label: '生产模型预测', color: COLORS.baseline, values: data.points.map((point) => point.baseline) })
-  const errorSeries: LineSeries[] = [{ key: 'error', label: '预测误差', color: COLORS.error, values: data.points.map((point) => point.error) }]
+  const errorSeries: LineSeries[] = [{ key: 'error', label: '预测误差', color: COLORS.error, values: errorData.points.map((point) => point.error) }]
   const chartNote = data.points.length === 0
     ? data.sourceCount > 0 ? `后端返回 ${data.sourceCount.toLocaleString()} 条测试数据，但暂无可用图表点位` : '暂无图表数据'
     : data.serverSampled || data.clientSampled
@@ -179,9 +181,9 @@ export function EvaluationDashboard({ evaluation }: { evaluation: ModelEvaluatio
       : `图表显示全部 ${data.points.length.toLocaleString()} 个时间点`
   return <div className="evaluation-dashboard">
     <div className="metric-grid evaluation-metrics" aria-label="测试集评估指标">{METRICS.map((metric) => <div className="metric-card" key={metric}><small>{metricLabel(metric)}</small><strong>{metricCardValue(metrics[metric])}</strong><span>{metric === 'r2' ? '越高越好' : '越低越好'}</span></div>)}</div>
-    <div className="evaluation-meta"><span>指标样本：{finite(metrics.sample_count) ? metrics.sample_count.toLocaleString() : '—'}（后端完整测试集）</span>{finite(mapeValidCount) && <span>MAPE 有效样本：{mapeValidCount.toLocaleString()}</span>}{mapeNote && <span>{mapeNote}</span>}</div>
+    <div className="evaluation-meta"><span>指标样本：{finite(metrics.sample_count) ? metrics.sample_count.toLocaleString() : '未知'}</span>{finite(mapeValidCount) && <span>MAPE 有效样本：{mapeValidCount.toLocaleString()}</span>}{finite(metrics.mape_excluded_count) && <span>MAPE 排除样本：{metrics.mape_excluded_count.toLocaleString()}</span>}{mapeNote && <span>{mapeNote}</span>}</div>
     <section className="comparison-section"><div className="section-heading compact-heading"><div><h3>生产模型与本次新模型</h3><p>变化值按“新模型 − 生产模型”计算</p></div></div>{!production && <InfoBox tone="warning">暂无当前生产模型对比数据，本次新模型指标仍可查看；发布后可用于后续对比。</InfoBox>}<div className="table-wrap comparison-table-wrap"><table className="comparison-table"><thead><tr><th>指标</th><th>{production?.version ?? '当前生产模型'}<small>当前生产</small></th><th>{candidate?.version ?? '本次新模型'}<small>本次候选</small></th><th>变化 / 方向</th></tr></thead><tbody>{rows.map((row) => <tr key={row.metric}><th>{metricLabel(row.metric)}</th><td>{metricCardValue(row.production)}</td><td>{metricCardValue(row.candidate)}</td><td className={row.delta == null ? '' : row.delta === 0 ? 'delta-neutral' : ((row.metric === 'r2' ? row.delta > 0 : row.delta < 0) ? 'delta-good' : 'delta-bad')}>{formatDelta(row.delta, row.metric)}{row.delta != null && <small>{row.metric === 'r2' ? row.delta > 0 ? ' ↑' : row.delta < 0 ? ' ↓' : ' →' : row.delta < 0 ? ' ↓' : row.delta > 0 ? ' ↑' : ' →'}</small>}</td></tr>)}</tbody></table></div>{(production?.metrics.mape_note || mapeNote) && <p className="comparison-note">MAPE 说明：{production?.metrics.mape_note ?? mapeNote}</p>}</section>
-    <div className="charts-grid"><LineChart title="测试集实际值 / 预测值" description="横轴为测试集时间，悬停或聚焦数据点查看详情" points={data.points} series={lineSeries} /><LineChart title="预测误差" description="误差 = 实际值 − 新模型预测值" points={data.points} series={errorSeries} error /><MetricComparisonChart candidate={candidate} production={production} /></div>
+    <div className="charts-grid"><LineChart title="测试集实际值 / 预测值" description="横轴为测试集时间，悬停或聚焦数据点查看详情" points={data.points} series={lineSeries} /><LineChart title="预测误差" description="误差 = 实际值 − 新模型预测值" points={errorData.points} series={errorSeries} error /><MetricComparisonChart candidate={candidate} production={production} /></div>
     <div className="chart-data-note"><span>{chartNote}</span>{data.invalidCount > 0 && <span> · 已忽略 {data.invalidCount} 条无效图表记录；指标未受影响</span>}</div>
   </div>
 }

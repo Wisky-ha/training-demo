@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { ApiError, apiClient } from '../api'
+import { ApiError, apiClient, createIdempotencyKey } from '../api'
 import { EvaluationDashboard } from '../components/evaluation/EvaluationCharts'
 import { useAppStore } from '../store/useAppStore'
 import {
@@ -15,14 +15,10 @@ import {
   type PreprocessTask,
   type ScriptContract,
   type TrainingJob,
+  type TrainingLog,
+  type ModelVersionSummary,
 } from '../types/contracts'
 import { workflowSteps, type WorkflowDraft, type WorkflowStepId } from '../types/workflow'
-
-const modelDescriptions: Record<ModelTypeCode, string> = {
-  electric_load: '面向建筑与设备用电负荷的时序预测。',
-  heating_cooling_load: '面向冷热源系统负荷的时序预测。',
-  integrated_energy: '面向综合能源消耗趋势的时序预测。',
-}
 
 const stepIndexes = Object.fromEntries(
   workflowSteps.map((step, index) => [step.id, index]),
@@ -51,6 +47,20 @@ function isNotFound(error: unknown): boolean {
 
 function asLogs(logs: Array<{ message: string } | string> | undefined) {
   return (logs ?? []).map((item) => typeof item === 'string' ? item : item.message)
+}
+
+function mergeTrainingLogs(current: TrainingLog[], incoming: TrainingLog[]): TrainingLog[] {
+  const result = [...current]
+  const keyFor = (item: TrainingLog) => typeof item === 'string' ? item : `${item.timestamp}|${item.level}|${item.message}`
+  const keys = new Set(current.map(keyFor))
+  incoming.forEach((item) => {
+    const key = keyFor(item)
+    if (!keys.has(key)) {
+      keys.add(key)
+      result.push(item)
+    }
+  })
+  return result
 }
 
 function ErrorBox({ message, onRetry }: { message: string | null; onRetry?: () => void }) {
@@ -111,7 +121,6 @@ function ModelTypeStep({ select }: { select: (type: ModelTypeCode) => void }) {
         <div>
           <p className="eyebrow">STEP 01 / MODEL TYPE</p>
           <h2>选择要训练的模型类型</h2>
-          <p>先确定目标模型，后续数据与脚本会按类型校验。</p>
         </div>
         <span className="panel-count">{modelType ? '已选择' : '必选'}</span>
       </div>
@@ -126,7 +135,6 @@ function ModelTypeStep({ select }: { select: (type: ModelTypeCode) => void }) {
             <span className="model-option-icon">{code === 'electric_load' ? '⚡' : code === 'heating_cooling_load' ? '◒' : '⌁'}</span>
             <span>
               <strong>{MODEL_TYPE_NAMES[code]}</strong>
-              <small>{modelDescriptions[code]}</small>
               <em>{code}</em>
             </span>
             <b aria-hidden="true">{modelType === code ? '✓' : '○'}</b>
@@ -138,51 +146,54 @@ function ModelTypeStep({ select }: { select: (type: ModelTypeCode) => void }) {
   )
 }
 
+function displayValue(value: string | number | null | undefined): string {
+  return value === null || value === undefined || value === '' ? '未知' : String(value)
+}
+
+function formatBytes(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '未知'
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function validationLabel(dataset: DatasetUploadResult): string {
+  if (dataset.validation?.valid === true) return '通过'
+  if (dataset.validation?.valid === false) return '失败'
+  const wireStatus = (dataset.validation as unknown as { status?: unknown } | null)?.status
+  if (typeof wireStatus === 'string' && wireStatus.trim()) return wireStatus.toUpperCase()
+  return '未知'
+}
+
 function DatasetSummary({ dataset }: { dataset: DatasetUploadResult }) {
-  const missing = dataset.missing_values ?? {}
+  const range = dataset.time_range
   return (
     <div className="dataset-summary">
-      <div className="summary-stat-grid">
-        <div><small>数据行数</small><strong>{dataset.row_count.toLocaleString()}</strong></div>
-        <div><small>字段数</small><strong>{dataset.column_count}</strong></div>
-        <div><small>数值列</small><strong>{dataset.numeric_columns?.length ?? 0}</strong></div>
-        <div><small>时间解析</small><strong className="success-text">{dataset.time_parse?.success ? '成功' : '失败'}</strong></div>
+      <div className="file-facts" aria-label="上传数据状态">
+        <span>文件名：<b>{displayValue(dataset.file_name)}</b></span>
+        <span>数据集 ID：<b>{displayValue(dataset.id ?? dataset.dataset_id)}</b></span>
+        <span>文件大小：<b>{formatBytes(dataset.file_size_bytes)}</b></span>
+        <span>校验状态：<b>{validationLabel(dataset)}</b></span>
       </div>
-      <div className="summary-meta">
-        <span>时间列：<b>{dataset.time_column}</b></span>
-        <span>目标列：<b>{dataset.target_column}</b></span>
-        <span>特征列：<b>{dataset.feature_columns?.join('、') || '—'}</b></span>
-      </div>
-      {dataset.time_parse && (
-        <div className="inline-note">
-          时间范围：{dataset.time_parse.min ?? '—'} ～ {dataset.time_parse.max ?? '—'} {dataset.time_parse.message && `· ${dataset.time_parse.message}`}
-        </div>
-      )}
       <div className="table-wrap">
         <table>
-          <thead><tr><th>字段</th><th>角色</th><th>类型</th><th>缺失值</th></tr></thead>
+          <thead><tr><th>字段名</th><th>角色</th><th>类型-缺失</th></tr></thead>
           <tbody>
-            {(dataset.columns ?? []).map((column) => (
+            {(dataset.columns ?? []).length ? dataset.columns.map((column) => (
               <tr key={column.name}>
-                <td><b>{column.name}</b></td>
-                <td><span className={`role-pill ${column.role}`}>{column.role === 'time' ? '时间' : column.role === 'target' ? '目标' : '特征'}</span></td>
-                <td>{column.data_type}</td>
-                <td>{column.missing_count}（{(column.missing_ratio * 100).toFixed(1)}%）{missing[column.name]?.missing_count ? ' · 可在预处理中处理' : ''}</td>
+                <td><b>{displayValue(column.name)}</b></td>
+                <td><span className={`role-pill ${column.role ?? 'unknown'}`}>{column.role === 'time' ? '时间列' : column.role === 'target' ? '目标 y' : column.role === 'feature' ? '特征 X' : '未识别'}</span></td>
+                <td>{displayValue(column.data_type)} - 缺失 {displayValue(column.missing_count)}</td>
               </tr>
-            ))}
+            )) : <tr><td colSpan={3}>暂无字段摘要</td></tr>}
           </tbody>
         </table>
       </div>
-      <h3 className="subheading">样例数据（前 5 行）</h3>
-      <div className="table-wrap preview-table">
-        <table>
-          <thead><tr>{dataset.columns.map((column) => <th key={column.name}>{column.name}</th>)}</tr></thead>
-          <tbody>
-            {(dataset.preview_rows ?? []).map((row, index) => (
-              <tr key={index}>{dataset.columns.map((column) => <td key={column.name}>{String(row[column.name] ?? '—')}</td>)}</tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="metadata-grid" aria-label="数据集元数据">
+        <div><b>{displayValue(dataset.id ?? dataset.dataset_id)}</b><span>数据集 ID</span></div>
+        <div><b>{displayValue(dataset.row_count)}</b><span>行数</span></div>
+        <div><b>{displayValue(dataset.column_count)}</b><span>列数</span></div>
+        <div><b>{range ? `${displayValue(range.start)} ～ ${displayValue(range.end)}` : '未知'}</b><span>时间范围</span></div>
       </div>
     </div>
   )
@@ -227,7 +238,6 @@ function UploadStep({
         <div>
           <p className="eyebrow">STEP 02 / DATASET</p>
           <h2>上传并检查 CSV 数据</h2>
-          <p>上传后自动解析完整表头、字段角色、时间列和缺失值信息。</p>
         </div>
       </div>
       <ErrorBox message={error} />
@@ -246,13 +256,13 @@ function UploadStep({
           <input accept=".csv,text/csv" onChange={(event) => void upload(event.target.files?.[0])} type="file" />
           <span className="upload-icon">↑</span>
           <strong>{uploading ? '正在上传并解析…' : '拖拽 CSV 文件到这里'}</strong>
-          <small>或点击选择文件 · 支持 UTF-8 / GB18030 · 最大 50 MB</small>
+          <small>或点击选择文件</small>
         </label>
       )}
       {uploading && <div className="loading-line"><span className="spinner" />上传、解析与校验进行中</div>}
       {dataset && (
         <>
-          <div className="file-chip"><span>CSV</span><b>{dataset.file_name}</b><small>{dataset.status === 'parsed' ? '解析完成' : dataset.status}</small></div>
+          <div className="file-chip"><span>CSV</span><b>{displayValue(dataset.file_name)}</b><small>{validationLabel(dataset)}</small></div>
           <DatasetSummary dataset={dataset} />
         </>
       )}
@@ -291,6 +301,7 @@ function PreprocessStep({
   const [skip, setSkip] = useState(!selected)
   const [loading, setLoading] = useState(true)
   const [running, setRunning] = useState(false)
+  const [uploadingScript, setUploadingScript] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -305,8 +316,8 @@ function PreprocessStep({
     }
     let alive = true
     setLoading(true)
-    apiClient.listScripts({ model_type: modelType, script_type: 'preprocessor' })
-      .then((response) => { if (alive) setScripts(response.items) })
+    apiClient.listScripts({ model_type: modelType, script_type: 'preprocessor', status: 'ENABLED' })
+      .then((response) => { if (alive) setScripts(response.items.filter((script) => upperStatus(script.status) === 'ENABLED')) })
       .catch((reason) => { if (alive) setError(errorMessage(reason)) })
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
@@ -327,6 +338,29 @@ function PreprocessStep({
       evaluation: null,
       modelVersion: null,
     })
+  }
+
+  const uploadScript = async (file?: File) => {
+    if (!file || !modelType) return
+    if (!file.name.toLowerCase().endsWith('.py')) {
+      setError('仅支持 .py 文件')
+      return
+    }
+    setUploadingScript(true)
+    setError(null)
+    try {
+      const script = await apiClient.uploadScript({ file, name: file.name, script_type: 'preprocessor', supported_model_types: [modelType] })
+      if (upperStatus(script.status) !== 'ENABLED') {
+        setError('上传脚本未处于 ENABLED 状态，不能用于预处理')
+        return
+      }
+      setScripts((current) => [...current.filter((item) => item.id !== script.id), script])
+      changeSelection(false, script.id)
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setUploadingScript(false)
+    }
   }
 
   const run = async () => {
@@ -351,13 +385,13 @@ function PreprocessStep({
   }
 
   const taskStatus = upperStatus(task?.status)
+  const qualityChecks = task?.quality_checks?.checks ?? []
   return (
     <section className="workflow-panel">
       <div className="panel-heading">
         <div>
           <p className="eyebrow">STEP 03 / PREPROCESS</p>
-          <h2>选择数据预处理方式</h2>
-          <p>预处理在后端执行并保存阶段日志；也可以明确跳过。</p>
+          <h2>数据预处理</h2>
         </div>
       </div>
       <ErrorBox message={error} />
@@ -368,11 +402,15 @@ function PreprocessStep({
             onChange={(event) => changeSelection(event.target.checked, event.target.checked ? null : selected)}
             type="checkbox"
           />
-          <span><b>跳过预处理</b><small>直接使用原始特征进入数据集划分</small></span>
+          <span><b>跳过预处理</b></span>
         </label>
-        <span className="muted-caption">{loading ? '加载脚本中…' : `${scripts.length} 个可用脚本`}</span>
+        <label className="secondary-button action-button">
+          上传预处理脚本
+          <input aria-label="上传预处理脚本" accept=".py,text/x-python" hidden onChange={(event) => void uploadScript(event.target.files?.[0])} type="file" />
+        </label>
       </div>
-      {!skip && (
+      {loading && <div className="loading-line"><span className="spinner" />读取 ENABLED 脚本…</div>}
+      {!skip && !loading && (
         <div className="script-list">
           {scripts.map((script) => (
             <button
@@ -381,37 +419,37 @@ function PreprocessStep({
               onClick={() => changeSelection(false, script.id)}
               type="button"
             >
-              <span><b>{script.name}</b><small>版本 {script.version} · {script.status.toLowerCase() === 'enabled' ? '已启用' : '已停用'}</small></span>
-              <i>{selected === script.id ? '✓' : '选择'}</i>
+              <span><b>{script.name}</b><small>状态：{upperStatus(script.status) ?? '未知'} · ID：{script.id}</small></span>
+              <i>{selected === script.id ? '已选择' : '选择'}</i>
             </button>
           ))}
-          {!loading && !scripts.length && <div className="empty-state compact">没有适用于该模型的预处理脚本，可选择跳过。</div>}
+          {!scripts.length && <div className="empty-state compact">暂无 ENABLED 预处理脚本</div>}
         </div>
       )}
+      {uploadingScript && <div className="loading-line"><span className="spinner" />上传脚本中…</div>}
       {task && (
         <div className="stage-result">
-          <div className="stage-title">
-            <span className={`status-dot ${taskStatus === 'FAILED' ? 'danger' : 'success'}`} />
-            预处理{taskStatus === 'SKIPPED' ? '已跳过' : taskStatus === 'SUCCEEDED' ? '已完成' : task.status}
+          <div className="stage-title"><span className={`status-dot ${taskStatus === 'FAILED' ? 'danger' : 'success'}`} />预处理{taskStatus === 'SKIPPED' ? '已跳过' : '任务结果'}</div>
+          {task.preprocess_message && <InfoBox>{task.preprocess_message}</InfoBox>}
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>项目</th><th>结果</th><th>状态</th></tr></thead>
+              <tbody>
+                <tr><td>任务状态</td><td>{displayValue(task.status)}</td><td>{taskStatus === 'FAILED' ? '失败' : taskStatus === 'SKIPPED' ? '已跳过' : displayValue(taskStatus)}</td></tr>
+                <tr><td>当前阶段</td><td>{displayValue(task.current_stage ?? task.stage)}</td><td>{displayValue(task.progress_stage)}</td></tr>
+                <tr><td>行数</td><td>{displayValue(task.input_row_count)} → {displayValue(task.output_row_count)}</td><td>{displayValue(task.data_source)}</td></tr>
+                <tr><td>字段映射</td><td>{task.input_columns?.length ? `${task.input_columns.join('、')} → ${task.output_columns?.join('、') || '未知'}` : '未知'}</td><td>{task.preprocess_used ? '已使用' : '未使用'}</td></tr>
+                <tr><td>质量检查</td><td>{qualityChecks.length ? qualityChecks.map((check) => `${check.code}：${check.message ?? '未提供'}`).join('；') : '未提供'}</td><td>{task.quality_checks ? task.quality_checks.valid ? '通过' : '失败' : '未提供'}</td></tr>
+              </tbody>
+            </table>
           </div>
-          <div className="stage-track">
-            {['数据读取', '预处理', '结果校验', '完成'].map((stage, index) => (
-              <span className={task.stage === 'completed' || index < 3 ? 'done' : ''} key={stage}>{index + 1}. {stage}</span>
-            ))}
-          </div>
-          <div className="stage-summary">
-            <span>输入：{task.input_row_count ?? '—'} 行</span>
-            <span>输出：{task.output_row_count ?? '—'} 行</span>
-            <span>字段：{task.output_columns?.join('、') || task.input_columns?.join('、') || '—'}</span>
-          </div>
-          <LogList logs={task.logs} />
           {task.error_message && <p className="error-text">{task.error_message}</p>}
         </div>
       )}
       <StepActions
         back={back}
         next={run}
-        nextDisabled={restoring || running || (!skip && !selected) || !datasetId}
+        nextDisabled={restoring || running || uploadingScript || (!skip && !selected) || !datasetId}
         nextLabel={running ? '执行中…' : taskStatus === 'SUCCEEDED' || taskStatus === 'SKIPPED' ? '重新执行' : '执行并继续'}
       />
     </section>
@@ -473,21 +511,22 @@ function SplitStep({
         <div>
           <p className="eyebrow">STEP 04 / FIXED SPLIT</p>
           <h2>数据集划分</h2>
-          <p>平台按时间升序固定划分 80% 训练集与 20% 测试集，不提供比例编辑。</p>
         </div>
       </div>
       <ErrorBox message={error} />
       {loading && !split && <div className="loading-line"><span className="spinner" />读取划分结果…</div>}
       {split ? (
         <div className="split-result">
-          <InfoBox tone="success">✓ 划分已完成 · 时间升序排序后固定切分</InfoBox>
+          <InfoBox tone="success">划分已完成</InfoBox>
           <div className="split-bars">
-            <div><span style={{ width: '80%' }} /><b>训练集 80%</b><strong>{split.train_row_count.toLocaleString()} 行</strong></div>
-            <div><span style={{ width: '20%' }} /><b>测试集 20%</b><strong>{split.test_row_count.toLocaleString()} 行</strong></div>
+            <div><span style={{ width: '80%' }} /><b>训练集 80%</b><strong>{displayValue(split.train_row_count)} 行</strong></div>
+            <div><span style={{ width: '20%' }} /><b>测试集 20%</b><strong>{displayValue(split.test_row_count)} 行</strong></div>
           </div>
           <div className="split-detail">
-            <div><b>训练集时间范围</b><span>{split.train_time_start} ～ {split.train_time_end}</span></div>
-            <div><b>测试集时间范围</b><span>{split.test_time_start} ～ {split.test_time_end}</span></div>
+            <div><b>训练集时间范围</b><span>{displayValue(split.train_time_start)} ～ {displayValue(split.train_time_end)}</span></div>
+            <div><b>测试集时间范围</b><span>{displayValue(split.test_time_start)} ～ {displayValue(split.test_time_end)}</span></div>
+            <div><b>split_id</b><span>{displayValue(split.id)}</span></div>
+            <div><b>规则</b><span>按时间顺序 80/20，不随机打散</span></div>
           </div>
         </div>
       ) : (
@@ -529,8 +568,12 @@ function TrainingStep({
   const navigate = useNavigate()
   const [scripts, setScripts] = useState<ScriptContract[]>([])
   const [loading, setLoading] = useState(false)
+  const [uploadingScript, setUploadingScript] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const pollRun = useRef(0)
+  const logCursor = useRef<string | undefined>(undefined)
+  const logSince = useRef<string | undefined>(undefined)
+  const knownLogs = useRef<TrainingLog[]>([])
 
   useEffect(() => {
     if (!modelType) {
@@ -538,11 +581,34 @@ function TrainingStep({
       return
     }
     let alive = true
-    apiClient.listScripts({ model_type: modelType, script_type: 'trainer' })
-      .then((response) => { if (alive) setScripts(response.items) })
+    apiClient.listScripts({ model_type: modelType, script_type: 'trainer', status: 'ENABLED' })
+      .then((response) => { if (alive) setScripts(response.items.filter((script) => upperStatus(script.status) === 'ENABLED')) })
       .catch((reason) => { if (alive) setError(errorMessage(reason)) })
     return () => { alive = false }
   }, [modelType])
+
+  const uploadScript = async (file?: File) => {
+    if (!file || !modelType) return
+    if (!file.name.toLowerCase().endsWith('.py')) {
+      setError('仅支持 .py 文件')
+      return
+    }
+    setUploadingScript(true)
+    setError(null)
+    try {
+      const script = await apiClient.uploadScript({ file, name: file.name, script_type: 'trainer', supported_model_types: [modelType] })
+      if (upperStatus(script.status) !== 'ENABLED') {
+        setError('上传脚本未处于 ENABLED 状态，不能用于训练')
+        return
+      }
+      setScripts((current) => [...current.filter((item) => item.id !== script.id), script])
+      selectScript(script.id)
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setUploadingScript(false)
+    }
+  }
 
   const jobStatus = upperStatus(job?.status)
   useEffect(() => {
@@ -564,7 +630,8 @@ function TrainingStep({
           return
         }
         setError(null)
-        complete(next)
+        knownLogs.current = mergeTrainingLogs(knownLogs.current, next.logs ?? [])
+        complete({ ...next, logs: knownLogs.current })
       } catch (reason) {
         if (cancelled || pollRun.current !== runId) return
         setError(errorMessage(reason))
@@ -582,6 +649,49 @@ function TrainingStep({
       window.clearInterval(timer)
     }
   }, [clearMissingJob, complete, datasetId, jobId, jobStatus, modelType, pollingEnabled, preprocessTaskId, restoring])
+
+  useEffect(() => {
+    knownLogs.current = job?.logs ? [...job.logs] : []
+    logCursor.current = undefined
+    logSince.current = undefined
+  }, [jobId])
+
+  useEffect(() => {
+    if (!pollingEnabled || restoring || !jobId || !job || terminalTrainingStatuses.has(jobStatus ?? '')) return
+    let alive = true
+    let inFlight = false
+    const readLogs = async () => {
+      if (!alive || inFlight) return
+      inFlight = true
+      try {
+        const response = await apiClient.getTrainingJobLogs(jobId, {
+          since: logSince.current,
+          cursor: logCursor.current,
+          limit: 100,
+        })
+        if (!alive || response.job_id !== jobId) return
+        const incoming = response.items ?? []
+        knownLogs.current = mergeTrainingLogs(knownLogs.current, incoming)
+        logCursor.current = response.next_cursor ?? undefined
+        const latest = incoming[incoming.length - 1]
+        if (latest) logSince.current = latest.timestamp
+        if (incoming.length) {
+          const current = useAppStore.getState().workflow.trainingJob
+          if (current?.id === jobId) complete({ ...current, logs: knownLogs.current })
+        }
+      } catch (reason) {
+        if (alive) setError(errorMessage(reason))
+      } finally {
+        inFlight = false
+      }
+    }
+    void readLogs()
+    const timer = window.setInterval(() => void readLogs(), 1500)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [complete, jobId, jobStatus, pollingEnabled, restoring])
 
   const start = async () => {
     if (!modelType || !datasetId || !splitId || !preprocessTaskId || !selected) return
@@ -608,7 +718,26 @@ function TrainingStep({
     setLoading(true)
     setError(null)
     try {
-      complete(await apiClient.retryTrainingJob(jobId))
+      const next = await apiClient.retryTrainingJob(jobId)
+      knownLogs.current = []
+      logCursor.current = undefined
+      logSince.current = undefined
+      complete({ ...next, logs: [] })
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const cancel = async () => {
+    if (!jobId) return
+    setLoading(true)
+    setError(null)
+    try {
+      const next = await apiClient.cancelTrainingJob(jobId)
+      knownLogs.current = mergeTrainingLogs(knownLogs.current, next.logs ?? [])
+      complete({ ...next, logs: knownLogs.current })
     } catch (reason) {
       setError(errorMessage(reason))
     } finally {
@@ -627,7 +756,7 @@ function TrainingStep({
     })
   }
   const terminal = terminalTrainingStatuses.has(jobStatus ?? '')
-  const jobModelMatches = !job || !hasOwn(job, 'model_version_id') || job.model_version_id === modelVersionId
+  const jobModelMatches = Boolean(job && hasOwn(job, 'model_version_id') && job.model_version_id === modelVersionId)
   const canEvaluate = jobStatus === 'SUCCEEDED' && Boolean(modelVersionId) && jobModelMatches
   return (
     <section className="workflow-panel">
@@ -635,11 +764,16 @@ function TrainingStep({
         <div>
           <p className="eyebrow">STEP 05 / TRAINING</p>
           <h2>选择训练脚本并启动</h2>
-          <p>训练会生成候选模型，不会改变当前生产模型；完成后再决定是否发布。</p>
         </div>
       </div>
       <ErrorBox message={error} />
       {!job && (
+        <>
+        <label className="secondary-button action-button">
+          上传训练脚本
+          <input aria-label="上传训练脚本" accept=".py,text/x-python" hidden onChange={(event) => void uploadScript(event.target.files?.[0])} type="file" />
+        </label>
+        {uploadingScript && <div className="loading-line"><span className="spinner" />上传脚本中…</div>}
         <div className="script-list">
           {scripts.map((script) => (
             <button
@@ -648,12 +782,13 @@ function TrainingStep({
               onClick={() => selectScript(script.id)}
               type="button"
             >
-              <span><b>{script.name}</b><small>版本 {script.version} · 适用 {MODEL_TYPE_NAMES[modelType as ModelTypeCode]}</small></span>
+              <span><b>{script.name}</b><small>状态：{upperStatus(script.status) ?? '未知'} · ID：{script.id}</small></span>
               <i>{selected === script.id ? '✓' : '选择'}</i>
             </button>
           ))}
-          {!scripts.length && <div className="empty-state compact">暂无可用训练脚本，请先在脚本库启用兼容脚本。</div>}
+          {!scripts.length && <div className="empty-state compact">暂无 ENABLED 训练脚本</div>}
         </div>
+        </>
       )}
       {job && (
         <div className="training-status">
@@ -662,14 +797,13 @@ function TrainingStep({
             <b>{job.current_stage ?? job.progress_stage ?? '任务处理中'}</b>
             {!terminal && <span className="spinner" />}
           </div>
-          <div className="training-stages">
-            {['准备数据', '加载训练脚本', '执行训练', '保存模型', '进入评估'].map((stage) => (
-              <span className={(job.logs ?? []).some((log) => (typeof log === 'string' ? log : log.message).includes(stage)) ? 'done' : ''} key={stage}>{stage}</span>
-            ))}
-          </div>
+          <div className="stage-summary"><span>training_job_id：{displayValue(job.id)}</span><span>model_version_id：{displayValue(job.model_version_id)}</span><span>开始：{displayValue(job.started_at)}</span><span>完成：{displayValue(job.finished_at)}</span></div>
+          {job.progress && <div className="stage-summary"><span>进度阶段：{displayValue(job.progress.stage)}</span><span>进度状态：{displayValue(job.progress.status)}</span><span>{displayValue(job.progress.message)}</span></div>}
+          {job.stages?.length ? <div className="training-stages">{job.stages.map((stage, index) => <span className={stage.status === 'succeeded' ? 'done' : ''} key={`${stage.stage}-${index}`}>{displayValue(stage.stage)} · {displayValue(stage.status)}</span>)}</div> : null}
           <LogList logs={job.logs} />
           {job.error_message && <p className="error-text">{job.error_message}</p>}
           {jobStatus === 'FAILED' && <InfoBox tone="warning">本次训练失败，不会影响生产模型。修复脚本或配置后可以重试。</InfoBox>}
+          {!terminal && <div className="retry-row"><Button kind="danger" disabled={loading || restoring} onClick={cancel}>取消训练</Button></div>}
           {jobStatus === 'SUCCEEDED' && !canEvaluate && (
             <InfoBox tone="warning">训练任务已 SUCCEEDED，但响应缺少 model_version_id；评估与发布已阻断，请重新检查训练结果。</InfoBox>
           )}
@@ -678,10 +812,10 @@ function TrainingStep({
       <StepActions
         back={back}
         next={canEvaluate ? () => navigate('/workflow/evaluate') : start}
-        nextDisabled={restoring || loading || !selected || !datasetId || !splitId || !preprocessTaskId
-          || (job !== null && !['SUCCEEDED', 'FAILED'].includes(jobStatus ?? ''))
+        nextDisabled={restoring || loading || uploadingScript || !selected || !datasetId || !splitId || !preprocessTaskId
+          || (job !== null && !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(jobStatus ?? ''))
           || (jobStatus === 'SUCCEEDED' && !canEvaluate)}
-        nextLabel={loading ? '提交中…' : jobStatus === 'SUCCEEDED' ? '查看评估结果' : jobStatus === 'FAILED' ? '重新启动' : job ? '训练进行中…' : '启动训练'}
+        nextLabel={loading ? '提交中…' : jobStatus === 'SUCCEEDED' ? '查看评估结果' : jobStatus === 'FAILED' || jobStatus === 'CANCELLED' ? '重新启动' : job ? '训练进行中…' : '启动训练'}
       />
       {jobStatus === 'FAILED' && (
         <div className="retry-row"><Button kind="secondary" disabled={loading || restoring} onClick={retry}>失败重试</Button></div>
@@ -737,15 +871,19 @@ function EvaluationStep({
         <div>
           <p className="eyebrow">STEP 06 / EVALUATION</p>
           <h2>评估结果与模型对比</h2>
-          <p>指标来自完整测试集；图表按测试集时间展示，数据量过大时仅抽样图表点位。</p>
         </div>
       </div>
       <ErrorBox message={error} onRetry={retry} />
       {(loading || restoring) && <div className="loading-line"><span className="spinner" />读取评估结果…</div>}
       {evaluation && (
         <>
+          <div className="evaluation-meta" aria-label="评估结果摘要">
+            <span>模型版本：{displayValue(evaluation.model_version_id)}</span>
+            <span>样本数：{displayValue(evaluation.metrics.sample_count)}</span>
+            <span>MAPE 有效：{displayValue(evaluation.metrics.mape_valid_count)}</span>
+            <span>MAPE 排除：{displayValue(evaluation.metrics.mape_excluded_count)}</span>
+          </div>
           <EvaluationDashboard evaluation={evaluation} />
-          <InfoBox>评估已完成，可进入保存与发布。图表悬停可查看具体时间与数值。</InfoBox>
         </>
       )}
       {!loading && !restoring && !evaluation && <div className="empty-state">暂无评估结果，请确认训练任务已成功完成。</div>}
@@ -757,14 +895,36 @@ function EvaluationStep({
 function PublishStep({ back, restoring }: { back: () => void; restoring: boolean }) {
   const workflow = useAppStore((state) => state.workflow)
   const setContext = useAppStore((state) => state.setWorkflowContext)
+  const [currentModel, setCurrentModel] = useState<ModelVersionSummary | null>(null)
+  const [currentLoading, setCurrentLoading] = useState(false)
+  const [currentError, setCurrentError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [publishing, setPublishing] = useState(false)
   const [savedLocally, setSavedLocally] = useState(false)
   const [publishedLocally, setPublishedLocally] = useState(false)
+  const [publishOpen, setPublishOpen] = useState(false)
+  const [reason, setReason] = useState('')
   const [error, setError] = useState<string | null>(null)
   const lifecycleStatus = upperStatus(workflow.modelVersion?.status)
   const saved = savedLocally || lifecycleStatus === 'READY' || lifecycleStatus === 'PUBLISHED'
   const published = publishedLocally || lifecycleStatus === 'PUBLISHED'
+  const candidate = workflow.modelVersion
+  const candidateHealth = upperStatus(candidate?.health_status) === 'HEALTHY' ? 'HEALTHY' : upperStatus(candidate?.health_status) === 'ABNORMAL' ? 'ABNORMAL' : 'UNKNOWN'
+
+  useEffect(() => {
+    if (!workflow.modelType) return
+    let alive = true
+    setCurrentLoading(true)
+    setCurrentError(null)
+    apiClient.listModels({ model_type: workflow.modelType })
+      .then((models) => {
+        if (!alive) return
+        setCurrentModel(models.find((model) => model.is_current === true) ?? null)
+      })
+      .catch((reason) => { if (alive) setCurrentError(errorMessage(reason)) })
+      .finally(() => { if (alive) setCurrentLoading(false) })
+    return () => { alive = false }
+  }, [workflow.modelType])
 
   const save = async () => {
     if (!workflow.modelVersionId || !workflow.modelType) return
@@ -783,8 +943,9 @@ function PublishStep({ back, restoring }: { back: () => void; restoring: boolean
         target_column: workflow.dataset?.target_column,
         metrics: (workflow.evaluation?.metrics ?? {}) as Record<string, import('../types/contracts').JsonValue>,
       })
-      setContext({ modelVersion: model, modelVersionId: model.id })
+      setContext({ modelVersion: { ...model, status: 'READY' }, modelVersionId: model.id })
       setSavedLocally(true)
+      window.dispatchEvent(new CustomEvent('model-registry-updated'))
     } catch (reason) {
       setError(errorMessage(reason))
     } finally {
@@ -792,60 +953,91 @@ function PublishStep({ back, restoring }: { back: () => void; restoring: boolean
     }
   }
 
+  const openPublish = () => {
+    setError(null)
+    setReason('')
+    setPublishOpen(true)
+  }
+
   const publish = async () => {
     if (!workflow.modelVersionId) return
-    if (!window.confirm('发布后将成为当前生产模型，是否确认发布？')) return
+    const trimmedReason = reason.trim()
+    if (!trimmedReason) {
+      setError('发布原因不能为空')
+      return
+    }
     setPublishing(true)
     setError(null)
     try {
       const result = await apiClient.publishModel(workflow.modelVersionId, {
         confirmed: true,
-        message: '通过训练工作流发布',
+        reason: trimmedReason,
+        idempotency_key: createIdempotencyKey('publish'),
       })
-      setContext({ modelVersion: result.model as typeof workflow.modelVersion, modelVersionId: workflow.modelVersionId })
+      setContext({ modelVersion: { ...result.model, status: 'PUBLISHED' }, modelVersionId: workflow.modelVersionId })
       setPublishedLocally(true)
-    } catch (reason) {
-      setError(errorMessage(reason))
+      setPublishOpen(false)
+      window.dispatchEvent(new CustomEvent('model-registry-updated'))
+    } catch (reasonValue) {
+      setError(errorMessage(reasonValue))
     } finally {
       setPublishing(false)
     }
   }
 
+  const featureColumns = candidate?.feature_columns ?? workflow.dataset?.feature_columns ?? []
   return (
     <section className="workflow-panel">
       <div className="panel-heading">
         <div>
           <p className="eyebrow">STEP 07 / PUBLISH</p>
-          <h2>保存与发布模型</h2>
-          <p>保存候选版本后，发布前会再次确认；未发布的候选不会影响生产模型。</p>
+          <h2>保存与发布</h2>
         </div>
       </div>
       <ErrorBox message={error} />
       {restoring && <div className="loading-line"><span className="spinner" />读取候选模型版本…</div>}
-      {workflow.modelVersion && workflow.modelVersionId ? (
+      {currentLoading && <div className="loading-line"><span className="spinner" />读取当前生产版本…</div>}
+      {currentError && <ErrorBox message={currentError} />}
+      {candidate && workflow.modelVersionId ? (
         <div className="publish-card">
           <div className="publish-model">
             <span className="model-symbol">◆</span>
-            <div>
-              <b>{MODEL_TYPE_NAMES[workflow.modelType!]}</b>
-              <small>版本 {workflow.modelVersion.version} · {published ? '已发布' : saved ? '已保存，待发布' : '训练候选'}</small>
-            </div>
-            <span className={`status-badge ${published ? 'success' : 'info'}`}>{published ? 'PUBLISHED' : workflow.modelVersion.status}</span>
+            <div><b>候选版本</b><small>{displayValue(candidate.version)} · {displayValue(workflow.modelVersionId)}</small></div>
+            <span className={`status-badge ${saved ? 'success' : 'info'}`}>{saved ? 'READY' : displayValue(candidate.status)}</span>
+            <span className="status-badge">{candidateHealth}</span>
           </div>
-          <dl className="publish-facts">
-            <div><dt>训练任务</dt><dd>{workflow.trainingJobId ?? '—'}</dd></div>
-            <div><dt>生产影响</dt><dd>发布前不会改变</dd></div>
-          </dl>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>项目</th><th>当前值</th><th>状态</th></tr></thead>
+              <tbody>
+                <tr><td>模型版本</td><td>{displayValue(candidate.version)} / {displayValue(workflow.modelVersionId)}</td><td>{saved ? 'READY' : displayValue(candidate.status)}</td></tr>
+                <tr><td>训练任务</td><td>{displayValue(workflow.trainingJobId)}</td><td>{displayValue(workflow.trainingJob?.status)}</td></tr>
+                <tr><td>当前生产版本</td><td>{displayValue(currentModel?.version)}</td><td>{currentModel ? displayValue(currentModel.status) : '未知'}</td></tr>
+                <tr><td>时间列 / 目标列</td><td>{displayValue(candidate.time_column ?? workflow.dataset?.time_column)} / {displayValue(candidate.target_column ?? workflow.dataset?.target_column)}</td><td>—</td></tr>
+                <tr><td>特征列</td><td>{featureColumns.length ? featureColumns.join('、') : '未知'}</td><td>{featureColumns.length ? `${featureColumns.length} 列` : '未知'}</td></tr>
+              </tbody>
+            </table>
+          </div>
           <div className="publish-actions">
-            <Button disabled={restoring || saving || saved} kind="secondary" onClick={save}>{saving ? '保存中…' : saved ? '已保存' : '保存候选模型'}</Button>
-            <Button disabled={restoring || !saved || publishing || published} onClick={publish}>{publishing ? '发布中…' : published ? '发布成功' : '发布模型'}</Button>
+            <Button disabled={restoring || saving || saved} kind="secondary" onClick={save}>{saving ? '保存中…' : saved ? 'READY' : '保存候选版本'}</Button>
+            <Button disabled={restoring || !saved || publishing || published} onClick={openPublish}>{publishing ? '发布中…' : published ? 'PUBLISHED' : '发布'}</Button>
           </div>
         </div>
-      ) : !restoring ? (
-        <div className="empty-state">训练尚未生成可保存的模型版本。</div>
-      ) : null}
-      {published && <InfoBox tone="success">✓ 发布成功，模型已成为当前版本。</InfoBox>}
+      ) : !restoring ? <div className="empty-state">暂无候选模型版本</div> : null}
+      {published && <InfoBox tone="success">发布成功</InfoBox>}
       <StepActions back={back} />
+      {publishOpen && candidate && (
+        <div className="confirm-overlay" role="presentation">
+          <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="publish-dialog-title">
+            <h2 id="publish-dialog-title">确认发布</h2>
+            <p>候选版本：<b>{displayValue(candidate.version)}</b></p>
+            <p>当前生产版本：<b>{displayValue(currentModel?.version)}</b></p>
+            <label htmlFor="publish-reason">发布原因（必填）</label>
+            <textarea id="publish-reason" aria-label="发布原因" value={reason} onChange={(event) => setReason(event.target.value)} />
+            <div className="publish-actions"><Button kind="secondary" onClick={() => setPublishOpen(false)}>取消</Button><Button disabled={publishing || !reason.trim()} onClick={() => void publish()}>{publishing ? '提交中…' : '确认发布'}</Button></div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
@@ -1011,8 +1203,8 @@ function workflowGate(
     if (upperStatus(job.status) !== 'SUCCEEDED') {
       return { allowed: false, step: 'train', reason: '训练任务必须为 SUCCEEDED 后才能进入评估或发布。' }
     }
-    const jobModelId = hasOwn(job, 'model_version_id') ? job.model_version_id : workflow.modelVersionId
-    if (!workflow.modelVersionId || !jobModelId || jobModelId !== workflow.modelVersionId) {
+    const jobModelId = hasOwn(job, 'model_version_id') ? job.model_version_id : null
+    if (!hasOwn(job, 'model_version_id') || !workflow.modelVersionId || !jobModelId || jobModelId !== workflow.modelVersionId) {
       return { allowed: false, step: 'train', reason: '训练已成功但缺少 model_version_id，已阻断评估/发布；请重新检查训练结果。' }
     }
   }
@@ -1220,7 +1412,7 @@ export function WorkflowPage() {
 
       let jobValid = splitValid && !snapshot.trainingJobId
       let restoredJob: TrainingJob | null = null
-      let effectiveModelId = snapshot.modelVersionId
+      let effectiveModelId: string | null = null
       if (splitValid && snapshot.trainingJobId) {
         const job = jobResult.value
         if (jobResult.error) {
@@ -1244,7 +1436,7 @@ export function WorkflowPage() {
         } else {
           jobValid = true
           restoredJob = job
-          effectiveModelId = hasOwn(job, 'model_version_id') ? job.model_version_id : snapshot.modelVersionId
+          effectiveModelId = hasOwn(job, 'model_version_id') ? job.model_version_id : null
           Object.assign(patch, {
             trainingJobId: snapshot.trainingJobId,
             trainingJob: job,
@@ -1411,7 +1603,7 @@ export function WorkflowPage() {
   const completeTraining = useCallback((trainingJob: TrainingJob) => setContext({
     trainingJob,
     trainingJobId: trainingJob.id,
-    modelVersionId: trainingJob.model_version_id,
+    modelVersionId: trainingJob.model_version_id ?? null,
     modelVersion: null,
     evaluation: null,
   }), [setContext])
