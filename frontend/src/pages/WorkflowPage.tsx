@@ -1655,7 +1655,7 @@ export function WorkflowPage() {
   }
 
   return (
-    <div className="page-content">
+    <div className="page-content workflow-page">
       <div className="workflow-header">
         <div>
           <p className="eyebrow">TRAINING WORKFLOW / CONTROL ROOM</p>
@@ -1670,14 +1670,17 @@ export function WorkflowPage() {
         <div className="step-list">
           {workflowSteps.map((step, index) => {
             const stepGate = gate(step.id)
+            const stepNumber = String(index + 1).padStart(2, '0')
+            const locked = !stepGate.allowed || hydrating
             return (
               <button
-                className={`step-item${index === activeIndex ? ' active' : ''}${stepGate.allowed && !hydrating ? '' : ' locked'}`}
+                aria-label={locked ? `${stepNumber} × ${step.label} ${step.caption}` : undefined}
+                className={`step-item${index === activeIndex ? ' active' : ''}${locked ? ' locked' : ''}`}
                 key={step.id}
                 onClick={() => go(step.id)}
                 type="button"
               >
-                <div className="step-number">{stepGate.allowed && !hydrating ? String(index + 1).padStart(2, '0') : '×'}</div>
+                <div className="step-number">{stepNumber}</div>
                 <span className="step-label">{step.label}</span>
                 <span className="step-caption">{step.caption}</span>
               </button>

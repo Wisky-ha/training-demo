@@ -209,16 +209,16 @@ export function HomePage() {
 
   return (
     <div className="page-content home-page">
-      <div className="registry-header home-header">
-        <div>
-          <p className="eyebrow">MODEL REGISTRY / 03 MODELS</p>
-          <h1 className="page-title">模型总览</h1>
-        </div>
-        <Link className="primary-button action-button" to="/workflow/model-type">开始训练　→</Link>
-      </div>
-
       <div className="home-dashboard-grid">
         <div className="home-dashboard-main">
+          <div className="registry-header home-header">
+            <div>
+              <p className="eyebrow">MODEL REGISTRY / 03 MODELS</p>
+              <h1 className="page-title">模型总览</h1>
+            </div>
+            <Link className="primary-button action-button" to="/workflow/model-type">开始训练　→</Link>
+          </div>
+
           <section aria-label="模型统计" className="summary-stat-grid home-status-strip">
             <div>
               <small>生产模型</small>
@@ -266,10 +266,12 @@ export function HomePage() {
               return <div className="record-item home-alert-row" key={alert.id}>
                 <div>
                   <b>{alert.id || NOT_PROVIDED_TEXT}</b>
-                  <span>{modelTypeName(version?.model_type ?? alert.model_type)} · 版本：{version?.version ?? alert.model_version_id ?? NOT_PROVIDED_TEXT}</span>
-                  <span>原因：{alert.reason || NOT_PROVIDED_TEXT}</span>
-                  <small>状态：{alertStatusLabel(alert.status)}</small>
-                  {rollback && <small>回滚：{alert.rollback_from ?? NOT_PROVIDED_TEXT} → {alert.rollback_to ?? NOT_PROVIDED_TEXT}</small>}
+                  <div className="home-alert-copy">
+                    <span>{modelTypeName(version?.model_type ?? alert.model_type)} · 版本：{version?.version ?? alert.model_version_id ?? NOT_PROVIDED_TEXT}</span>
+                    <span>原因：{alert.reason || NOT_PROVIDED_TEXT}</span>
+                    <small>状态：{alertStatusLabel(alert.status)}</small>
+                    {rollback && <small>回滚：{alert.rollback_from ?? NOT_PROVIDED_TEXT} → {alert.rollback_to ?? NOT_PROVIDED_TEXT}</small>}
+                  </div>
                 </div>
                 <div className="row-actions">
                   <Link className="text-button" to="/audit">查看审计事件</Link>
@@ -283,7 +285,6 @@ export function HomePage() {
         <aside className="registry-panel compact-panel home-audit-panel">
           <div className="panel-heading">
             <div><h2>最近审计事件</h2></div>
-            <Link className="text-button" to="/audit">查看全部审计事件</Link>
           </div>
           {auditLoading && <div className="loading-state"><span className="spinner" />正在加载审计事件…</div>}
           {!auditLoading && auditError && <div className="alert-box error" role="alert"><span>{auditError}</span><button type="button" onClick={() => void loadDashboard()}>重试</button></div>}
@@ -295,6 +296,7 @@ export function HomePage() {
               <small>{formatDate(event.occurred_at)}</small>
             </div>
           })}</div>}
+          <Link className="text-button" to="/audit">查看全部审计事件</Link>
         </aside>
       </div>
     </div>
