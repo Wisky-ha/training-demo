@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -21,6 +21,10 @@ from .schemas.models import (
     PublishRequest,
     RollbackRequest,
     RollbackResponse,
+    AlertAcknowledgeRequest,
+    AlertAcknowledgeResponse,
+    AlertListResponse,
+    PublishRecordResponse,
 )
 from .services.audit_events import context_from_request, record_audit_event, record_failure_audit_event
 from .services.model_lifecycle import (
@@ -46,6 +50,7 @@ def _error(exc: ModelLifecycleError) -> HTTPException:
         "PUBLISH_CONFIRMATION_REQUIRED", "MODEL_ARTIFACT_INVALID",
         "MODEL_ARTIFACT_NOT_FOUND", "PREPROCESSOR_STATE_INVALID",
         "MODEL_INPUT_SCHEMA_INVALID", "ABNORMAL_REASON_REQUIRED", "MODEL_TYPE_NOT_FOUND",
+        "ROLLBACK_TARGET_REQUIRED",
     }:
         response_status = status.HTTP_400_BAD_REQUEST
     elif exc.code in {
@@ -65,9 +70,19 @@ def _error(exc: ModelLifecycleError) -> HTTPException:
 
 
 def _operation(operation: str, service: ModelLifecycleService, version: ModelVersionORM,
-               *, rollback=None, alert=None) -> dict[str, Any]:
+               *, rollback=None, alert=None, record=None) -> dict[str, Any]:
     model = service.to_model_response(version)
     result: dict[str, Any] = {"operation": operation, "model": model, **model}
+    if record is not None:
+        result["record"] = {
+            "id": record.id, "model_version_id": record.model_version_id,
+            "published_version": record.published_version,
+            "previous_current_version_id": record.previous_current_version_id,
+            "published_at": record.published_at,
+            "reason": record.reason if record.reason is not None else record.message,
+            "message": record.message,
+            "idempotency_key": record.idempotency_key,
+        }
     if rollback is not None:
         result["rollback"] = service.to_rollback_response(rollback)
     if alert is not None:
@@ -195,12 +210,12 @@ def publish_model(model_id: str, request: Request, body: PublishRequest | None =
     service = _service(request, session)
     body = body or PublishRequest()
     try:
-        version, _record = service.publish(
-            model_id, confirmed=body.is_confirmed, message=body.message or body.reason,
+        version, record = service.publish(
+            model_id, confirmed=body.confirmed, reason=body.reason,
             idempotency_key=body.idempotency_key,
             audit_context=context_from_request(request),
         )
-        return _operation("publish", service, version)
+        return _operation("publish", service, version, record=record)
     except ModelLifecycleError as exc:
         record_failure_audit_event(
             session, event_type="MODEL_PUBLISHED", object_type="MODEL_VERSION",
@@ -250,9 +265,13 @@ def rollback_model(model_id: str, request: Request, body: RollbackRequest | None
     service = _service(request, session)
     body = body or RollbackRequest()
     try:
+        if not body.target_version_id:
+            raise ModelLifecycleError(
+                "回滚必须显式提供 target_version_id", "ROLLBACK_TARGET_REQUIRED"
+            )
         rollback, target = service.rollback(
-            model_id, target_version_id=body.target_version_id or body.version_id,
-            target_version=body.target_version or body.version, reason=body.reason,
+            model_id, target_version_id=body.target_version_id, reason=body.reason,
+            idempotency_key=body.idempotency_key,
             audit_context=context_from_request(request),
         )
         return _operation("rollback", service, target, rollback=rollback)
@@ -321,7 +340,7 @@ def abnormal_model(model_id: str, request: Request, body: AbnormalRequest | None
         raise _error(exc) from exc
 
 
-@router.get("/{model_id}/publish-records")
+@router.get("/{model_id}/publish-records", response_model=list[PublishRecordResponse])
 def model_publish_records(model_id: str, request: Request, session: Session = Depends(get_session)):
     service = _service(request, session)
     if service.get(model_id) is None:
@@ -332,7 +351,9 @@ def model_publish_records(model_id: str, request: Request, session: Session = De
     return [{"id": item.id, "model_version_id": item.model_version_id,
              "published_version": item.published_version,
              "previous_current_version_id": item.previous_current_version_id,
-             "published_at": item.published_at, "message": item.message,
+             "published_at": item.published_at,
+             "reason": item.reason if item.reason is not None else item.message,
+             "message": item.message,
              "idempotency_key": item.idempotency_key} for item in records]
 
 
@@ -348,15 +369,59 @@ def model_rollback_records(model_id: str, request: Request, session: Session = D
     return [service.to_rollback_response(item) for item in records]
 
 
-@alerts_router.get("", response_model=list[ModelAlertResponse])
-@alerts_router.get("/", response_model=list[ModelAlertResponse], include_in_schema=False)
-def list_alerts(request: Request, model_type: ModelType | None = None,
-                status: AlertStatus | None = None, active_only: bool = False,
-                session: Session = Depends(get_session)):
+@alerts_router.get("", response_model=AlertListResponse | list[ModelAlertResponse])
+@alerts_router.get("/", response_model=AlertListResponse | list[ModelAlertResponse], include_in_schema=False)
+def list_alerts(
+    request: Request,
+    response: Response,
+    model_type: ModelType | None = None,
+    status: AlertStatus | None = None,
+    active_only: bool = False,
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=1000),
+    limit: int | None = Query(default=None, ge=1, le=1000),
+    cursor: str | None = Query(default=None, description="上一次响应的 next_cursor"),
+    session: Session = Depends(get_session),
+):
+    import base64
+    import json
     service = _service(request, session)
-    return [service.to_alert_response(item) for item in service.alerts(
-        model_type=model_type, status=status, active_only=active_only
-    )]
+    rows = service.alerts(model_type=model_type, status=status, active_only=active_only)
+    total = len(rows)
+    statistics = service.alert_statistics(rows)
+    start = 0
+    if cursor:
+        try:
+            token = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+            key = (token["created_at"], token["id"])
+            start = next((index + 1 for index, item in enumerate(rows)
+                          if (item.created_at.isoformat(), item.id) == key), total)
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            raise _error(ModelLifecycleError("告警游标无效", "ALERT_CURSOR_INVALID"))
+    requested_size = limit if limit is not None else page_size
+    page_number = page or 1
+    if cursor is None and page is not None and requested_size is not None:
+        start = (page_number - 1) * requested_size
+    page_items = rows[start:start + requested_size] if requested_size is not None else rows[start:]
+    next_page = None
+    if requested_size is not None and start + requested_size < total and page_items:
+        last = page_items[-1]
+        next_page = base64.urlsafe_b64encode(json.dumps({
+            "created_at": last.created_at.isoformat(), "id": last.id,
+        }, separators=(",", ":")).encode()).decode()
+    items = [service.to_alert_response(item) for item in page_items]
+    if page is None and page_size is None and limit is None and cursor is None:
+        # Compatibility: existing clients receive the original array shape;
+        # X-Total-Count supplies the same total without a second query.
+        response.headers["X-Total-Count"] = str(total)
+        return items
+    return {
+        "items": items, "total": total,
+        "page": page_number,
+        "page_size": requested_size,
+        "limit": limit,
+        "next_cursor": next_page, "statistics": statistics,
+    }
 
 
 @alerts_router.get("/{alert_id}", response_model=ModelAlertResponse)
@@ -368,13 +433,21 @@ def get_alert(alert_id: str, request: Request, session: Session = Depends(get_se
     return service.to_alert_response(alert)
 
 
-@alerts_router.post("/{alert_id}/acknowledge", response_model=ModelAlertResponse)
-@alerts_router.post("/{alert_id}/ack", response_model=ModelAlertResponse, include_in_schema=False)
-@alerts_router.post("/{alert_id}/confirm", response_model=ModelAlertResponse, include_in_schema=False)
-def acknowledge_alert(alert_id: str, request: Request, session: Session = Depends(get_session)):
+@alerts_router.post("/{alert_id}/acknowledge", response_model=AlertAcknowledgeResponse)
+@alerts_router.post("/{alert_id}/ack", response_model=AlertAcknowledgeResponse, include_in_schema=False)
+@alerts_router.post("/{alert_id}/confirm", response_model=AlertAcknowledgeResponse, include_in_schema=False)
+def acknowledge_alert(alert_id: str, request: Request, body: AlertAcknowledgeRequest | None = None,
+                      session: Session = Depends(get_session)):
     service = _service(request, session)
     try:
-        return service.to_alert_response(service.acknowledge_alert(alert_id, context_from_request(request)))
+        if body is not None and not body.confirmed:
+            raise ModelLifecycleError("确认告警必须 confirmed=true", "ALERT_CONFIRMATION_REQUIRED")
+        alert = service.acknowledge_alert(alert_id, context_from_request(request))
+        rows = service.alerts(model_type=alert.model_type)
+        return {
+            **service.to_alert_response(alert),
+            "statistics": service.alert_statistics(rows),
+        }
     except ModelLifecycleError as exc:
         record_failure_audit_event(
             session, event_type="ALERT_ACKNOWLEDGED", object_type="ALERT",

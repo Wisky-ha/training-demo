@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -61,11 +61,29 @@ class TrainingJobResponse(BaseModel):
     finished_at: datetime | None
 
 
+class TrainingLogEntry(BaseModel):
+    """One immutable log event returned by the incremental log endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    timestamp: datetime
+    level: Literal["debug", "info", "warning", "error"] = "info"
+    message: str
+    stage: str | None = None
+
+
 class TrainingJobLogsResponse(BaseModel):
+    """A stable, time-ordered page of training log events.
+
+    ``next_cursor`` is opaque to clients.  The old no-argument call still
+    returns all entries and therefore has a null cursor.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     job_id: ResourceId
-    items: list[str]
+    items: list[TrainingLogEntry]
+    next_cursor: str | None = None
 
 
 class MetricSet(BaseModel):
@@ -114,5 +132,6 @@ __all__ = [
     "MetricSet",
     "TrainingJobCreate",
     "TrainingJobLogsResponse",
+    "TrainingLogEntry",
     "TrainingJobResponse",
 ]

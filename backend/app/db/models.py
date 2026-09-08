@@ -455,6 +455,11 @@ class TrainingJobORM(Base):
     current_stage: Mapped[str | None] = mapped_column(String(100), nullable=True)
     stage_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     logs: Mapped[list[str]] = mapped_column(MutableList.as_mutable(JSON), nullable=False, default=list)
+    # Structured, timestamped entries back the incremental log contract while
+    # ``logs`` remains the legacy human-readable projection.
+    log_entries: Mapped[list[dict[str, Any]]] = mapped_column(
+        MutableList.as_mutable(JSON), nullable=False, default=list
+    )
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_details: Mapped[dict[str, Any]] = mapped_column(
         MutableDict.as_mutable(JSON), nullable=False, default=dict
@@ -652,7 +657,10 @@ class PublishRecordORM(Base):
     published_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utc_now, nullable=False
     )
+    # ``message`` is retained as the storage compatibility name. ``reason``
+    # is the canonical publication contract and is populated for new writes.
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     model_version: Mapped[ModelVersionORM] = relationship(
@@ -723,6 +731,12 @@ class RollbackRecordORM(Base):
         Index("ix_rollback_records_model_type_created_at", "model_type", "created_at"),
         Index("ix_rollback_records_status", "status"),
         Index("ix_rollback_records_alert_id", "alert_id"),
+        Index(
+            "uq_rollback_records_idempotency_key",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
@@ -735,6 +749,7 @@ class RollbackRecordORM(Base):
         String(36), ForeignKey("model_alerts.id"), nullable=True
     )
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[RollbackStatus] = mapped_column(
         _enum_column(RollbackStatus), nullable=False, default=RollbackStatus.PENDING
     )

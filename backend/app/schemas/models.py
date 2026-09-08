@@ -108,32 +108,64 @@ class ModelVersionResponse(BaseModel):
 
 
 class PublishRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    """Canonical publication command with a parser for old client names."""
 
-    # False is the safe default.  ``confirmed`` is accepted as a compatibility
-    # spelling used by clients that present a second confirmation dialog.
-    confirm: bool = False
-    confirmed: bool | None = None
-    confirmation: bool | None = None
-    idempotency_key: str | None = Field(default=None, min_length=1, max_length=255)
-    message: str | None = Field(default=None, max_length=2000)
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: bool = False
     reason: str | None = Field(default=None, max_length=2000)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=255)
 
-    @property
-    def is_confirmed(self) -> bool:
-        return self.confirm or self.confirmed is True or self.confirmation is True
+    @model_validator(mode="before")
+    @classmethod
+    def parse_compatibility_names(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        if "confirmed" not in data:
+            data["confirmed"] = data.get("confirm", data.get("confirmation", False))
+        if "reason" not in data and "message" in data:
+            data["reason"] = data["message"]
+        # These names are deliberately removed so they do not appear as
+        # normative OpenAPI request fields, while old integrations still work.
+        data.pop("confirm", None)
+        data.pop("confirmation", None)
+        data.pop("message", None)
+        return data
 
 
 class RollbackRequest(BaseModel):
+    """Canonical explicit-target rollback command.
+
+    ``version_id``/``version`` are parsed only as compatibility aliases.  A
+    path model id is never used as an implicit rollback destination.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
+    # Canonical callers provide all three fields. Defaults preserve parsing of
+    # pre-step-6 clients; the router still rejects an omitted target rather
+    # than silently using the path model.
     target_version_id: ResourceId | None = None
-    target_version: str | None = Field(default=None, min_length=1, max_length=100)
-    # Compatibility spellings for clients whose rollback dialog calls the
-    # destination simply ``version_id``/``version``.
-    version_id: ResourceId | None = None
-    version: str | None = Field(default=None, min_length=1, max_length=100)
     reason: str = Field(default="手动回滚", min_length=1, max_length=2000)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_compatibility_target(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        if "target_version_id" not in data:
+            if data.get("version_id") is not None:
+                data["target_version_id"] = data["version_id"]
+            # A version label was historically accepted by the service. It is
+            # retained under a private compatibility key for the router.
+            elif data.get("version") is not None:
+                data["target_version_id"] = data["version"]
+        data.pop("version_id", None)
+        data.pop("version", None)
+        return data
 
 
 class AbnormalRequest(BaseModel):
@@ -160,6 +192,13 @@ class ModelAbnormalRequest(BaseModel):
     reason: str = Field(default="健康检查异常", min_length=1, max_length=2000)
 
 
+class AlertStatistics(BaseModel):
+    total: int
+    active: int
+    acknowledged: int
+    resolved: int
+
+
 class ModelAlertResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -175,6 +214,28 @@ class ModelAlertResponse(BaseModel):
     resolved_at: datetime | None
 
 
+class AlertAcknowledgeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: bool = True
+
+
+class AlertListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ModelAlertResponse]
+    total: int
+    page: int | None = None
+    page_size: int | None = None
+    limit: int | None = None
+    next_cursor: str | None = None
+    statistics: AlertStatistics
+
+
+class AlertAcknowledgeResponse(ModelAlertResponse):
+    statistics: AlertStatistics
+
+
 class RollbackResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -184,9 +245,24 @@ class RollbackResponse(BaseModel):
     rollback_to: ResourceId | None
     alert_id: ResourceId | None
     reason: str | None
+    idempotency_key: str | None = None
     status: RollbackStatus
     created_at: datetime
     finished_at: datetime | None
+
+
+class PublishRecordResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: ResourceId
+    model_version_id: ResourceId
+    published_version: str
+    previous_current_version_id: ResourceId | None
+    published_at: datetime
+    reason: str | None = None
+    # Compatibility response projection for old record consumers.
+    message: str | None = None
+    idempotency_key: str | None = None
 
 
 class LifecycleOperationResponse(BaseModel):
@@ -194,12 +270,14 @@ class LifecycleOperationResponse(BaseModel):
 
     operation: str
     model: ModelVersionResponse
+    record: PublishRecordResponse | None = None
     rollback: RollbackResponse | None = None
     alert: ModelAlertResponse | None = None
 
 
 __all__ = [
-    "AbnormalRequest", "LifecycleOperationResponse", "ModelAbnormalRequest", "ModelAlertResponse",
-    "ModelSaveRequest", "ModelVersionResponse", "PublishRequest",
+    "AbnormalRequest", "AlertAcknowledgeRequest", "AlertAcknowledgeResponse", "AlertListResponse",
+    "AlertStatistics", "LifecycleOperationResponse", "ModelAbnormalRequest", "ModelAlertResponse",
+    "ModelSaveRequest", "ModelVersionResponse", "PublishRecordResponse", "PublishRequest",
     "RollbackRequest", "RollbackResponse",
 ]

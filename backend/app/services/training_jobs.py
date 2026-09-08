@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
+import base64
 import copy
+import json
 import logging
 import threading
 from typing import Any
@@ -248,8 +250,10 @@ class TrainingJobService:
             current_stage="等待执行",
             config=dict(request.config),
             config_summary=summary,
-            logs=["PENDING：任务已创建，等待后台执行"],
+            logs=[],
+            log_entries=[],
         )
+        self._append_log(job, "PENDING：任务已创建，等待后台执行", stage="等待执行")
         record_audit_event(
             self.session, event_type="TRAINING_STARTED", object_type="TRAINING_JOB",
             object_id=job.id, model_type=job.model_type, training_job_id=job.id,
@@ -263,6 +267,71 @@ class TrainingJobService:
 
     def get(self, job_id: str) -> TrainingJobORM | None:
         return self.repository.get(job_id)
+
+    @classmethod
+    def _append_log(cls, job: TrainingJobORM, message: str, *, level: str = "info", stage: str | None = None) -> None:
+        """Append the legacy text projection and its durable structured event."""
+        now = cls._now()
+        job.logs = [*(job.logs or []), message]
+        entries = list(job.log_entries or [])
+        entries.append({
+            "timestamp": now.isoformat(), "level": level, "message": message,
+            "stage": stage,
+        })
+        job.log_entries = entries
+
+    @staticmethod
+    def log_page(
+        job: TrainingJobORM, *, since: datetime | None = None,
+        limit: int | None = None, cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Return a stable incremental page without silently ignoring filters."""
+        entries = list(job.log_entries or [])
+        if not entries:
+            # Rows created before structured log persistence remain readable.
+            entries = [
+                {"timestamp": (job.created_at + timedelta(microseconds=index)).isoformat(),
+                 "level": "info", "message": message, "stage": None}
+                for index, message in enumerate(job.logs or [])
+            ]
+        normalized: list[tuple[datetime, int, dict[str, Any]]] = []
+        for index, raw in enumerate(entries):
+            item = dict(raw) if isinstance(raw, dict) else {"message": str(raw)}
+            timestamp = item.get("timestamp")
+            try:
+                parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00")) if timestamp else job.created_at
+            except ValueError:
+                parsed = job.created_at
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            item["timestamp"] = parsed
+            item.setdefault("level", "info")
+            item.setdefault("stage", None)
+            item.setdefault("message", "")
+            normalized.append((parsed, index, item))
+        normalized.sort(key=lambda value: (value[0], value[1]))
+        start = 0
+        if cursor:
+            try:
+                token = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+                cursor_index = int(token["index"])
+                start = next((position + 1 for position, (_, index, _) in enumerate(normalized)
+                              if index == cursor_index), len(normalized))
+            except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+                raise TrainingJobError("训练日志游标无效", "TRAINING_LOG_CURSOR_INVALID")
+        filtered = normalized[start:]
+        if since is not None:
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+            filtered = [item for item in filtered if item[0] > since]
+        has_more = limit is not None and len(filtered) > limit
+        page = filtered[:limit] if limit is not None else filtered
+        result = [{**item, "timestamp": timestamp.isoformat()} for timestamp, _, item in page]
+        next_cursor = None
+        if has_more and page:
+            token = {"index": page[-1][1], "timestamp": page[-1][0].isoformat()}
+            next_cursor = base64.urlsafe_b64encode(json.dumps(token, separators=(",", ":")).encode()).decode()
+        return result, next_cursor
 
     def retry(
         self, job_id: str, audit_context: AuditContext | None = None
@@ -303,7 +372,7 @@ class TrainingJobService:
         job.error_code = None
         job.error_details = {}
         job.model_version_id = None
-        job.logs = [*(job.logs or []), "PENDING：已提交失败重试"]
+        self._append_log(job, "PENDING：已提交失败重试", stage="等待执行")
         record_audit_event(
             self.session, event_type="TRAINING_STARTED", object_type="TRAINING_JOB",
             object_id=job.id, model_type=job.model_type, training_job_id=job.id,
@@ -330,7 +399,7 @@ class TrainingJobService:
             job.current_stage = "已取消"
             job.stage_started_at = now
             job.finished_at = now
-            job.logs = [*(job.logs or []), "CANCELLED：任务在后台执行前已取消"]
+            self._append_log(job, "CANCELLED：任务在后台执行前已取消", stage="CANCELLED")
             record_audit_event(
                 self.session, event_type="TRAINING_CANCELLED", object_type="TRAINING_JOB",
                 object_id=job.id, model_type=job.model_type, training_job_id=job.id,
@@ -338,7 +407,7 @@ class TrainingJobService:
             )
             self.session.commit()
         else:
-            job.logs = [*(job.logs or []), "已收到取消请求，任务将在当前操作结束后停止"]
+            self._append_log(job, "已收到取消请求，任务将在当前操作结束后停止")
             self.session.commit()
         return job
 
@@ -358,7 +427,7 @@ class TrainingJobService:
         job.progress_stage = stage
         job.current_stage = stage
         job.stage_started_at = now
-        job.logs = [*(job.logs or []), message]
+        self._append_log(job, message, stage=stage)
         self.session.commit()
 
     def _check_cancel(self, job: TrainingJobORM) -> None:
@@ -389,10 +458,9 @@ class TrainingJobService:
         job.error_code = error_code
         job.error_details = safe_details
         job.finished_at = now
-        entries = [*(job.logs or []), f"FAILED[{error_code}]：{message}"]
+        self._append_log(job, f"FAILED[{error_code}]：{message}", level="error", stage="FAILED")
         if safe_details:
-            entries.append(f"异常详情：{safe_details}")
-        job.logs = entries
+            self._append_log(job, f"异常详情：{safe_details}", level="error", stage="FAILED")
         self.session.commit()
         record_failure_audit_event(
             self.session, event_type="TRAINING_FAILED", object_type="TRAINING_JOB",
@@ -431,7 +499,7 @@ class TrainingJobService:
         job.current_stage = "已取消"
         job.stage_started_at = now
         job.finished_at = now
-        job.logs = [*(job.logs or []), "CANCELLED：任务已取消，未生成模型版本"]
+        self._append_log(job, "CANCELLED：任务已取消，未生成模型版本", stage="CANCELLED")
         record_audit_event(
             self.session, event_type="TRAINING_CANCELLED", object_type="TRAINING_JOB",
             object_id=job.id, model_type=job.model_type, training_job_id=job.id,
@@ -806,7 +874,8 @@ class TrainingJobService:
                     script=train_script, X_train=X_train, y_train=y_train, X_test=X_test,
                     y_test=y_test, config=config or job.config,
                 )
-            job.logs = [*(job.logs or []), *result.logs]
+            for message in result.logs:
+                self._append_log(job, message, stage="执行训练")
             self.session.commit()
             self._check_cancel(job)
             if not result.success or result.model is None:
@@ -831,7 +900,7 @@ class TrainingJobService:
             job.current_stage = "进入评估"
             job.stage_started_at = self._now()
             job.finished_at = self._now()
-            job.logs = [*(job.logs or []), f"SUCCEEDED：评估完成，模型已保存为 READY（{model_path}）"]
+            self._append_log(job, f"SUCCEEDED：评估完成，模型已保存为 READY（{model_path}）", stage="进入评估")
             record_audit_event(
                 self.session, event_type="MODEL_SAVED", object_type="MODEL_VERSION",
                 object_id=version.id, model_type=version.model_type,

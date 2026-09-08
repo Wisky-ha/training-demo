@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from ..db.session import get_session
@@ -27,6 +28,8 @@ def _error(exc: TrainingJobError) -> HTTPException:
         response_status = status.HTTP_409_CONFLICT
     elif code == "EVALUATION_NOT_READY":
         response_status = status.HTTP_409_CONFLICT
+    elif code == "TRAINING_LOG_CURSOR_INVALID":
+        response_status = status.HTTP_400_BAD_REQUEST
     else:
         response_status = status.HTTP_400_BAD_REQUEST
     details = dict(getattr(exc, "details", {}) or {})
@@ -87,11 +90,26 @@ def get_training_job(job_id: str, request: Request, session: Session = Depends(g
 
 
 @router.get("/{job_id}/logs", response_model=TrainingJobLogsResponse)
-def get_training_job_logs(job_id: str, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
-    job = _service(request, session).get(job_id)
+def get_training_job_logs(
+    job_id: str,
+    request: Request,
+    since: datetime | None = Query(default=None, description="只返回该时间之后新增的日志"),
+    limit: int | None = Query(default=None, ge=1, le=1000),
+    cursor: str | None = Query(default=None, description="上一次响应的 next_cursor"),
+    next_cursor: str | None = Query(default=None, description="cursor 的兼容查询名称"),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    service = _service(request, session)
+    job = service.get(job_id)
     if job is None:
         raise _error(TrainingJobNotFoundError(f"训练任务不存在：{job_id}"))
-    return {"job_id": job.id, "items": list(job.logs or [])}
+    try:
+        items, page_cursor = service.log_page(
+            job, since=since, limit=limit, cursor=cursor or next_cursor,
+        )
+    except TrainingJobError as exc:
+        raise _error(exc) from exc
+    return {"job_id": job.id, "items": items, "next_cursor": page_cursor}
 
 
 @router.post("/{job_id}/retry", response_model=TrainingJobResponse)

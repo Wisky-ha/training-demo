@@ -107,6 +107,7 @@ def initialize_database(
     Base.metadata.create_all(active_engine)
     _upgrade_audit_event_indexes(active_engine)
     _upgrade_training_job_columns(active_engine)
+    _upgrade_rollback_record_columns(active_engine)
     _upgrade_preprocessing_task_columns(active_engine)
     _upgrade_model_version_columns(active_engine)
     _upgrade_model_alert_columns(active_engine)
@@ -160,6 +161,23 @@ def _upgrade_publish_record_columns(engine: Engine) -> None:
         connection.execute(text(
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_publish_records_idempotency_key "
             "ON publish_records (idempotency_key) WHERE idempotency_key IS NOT NULL"
+        ))
+
+
+def _upgrade_rollback_record_columns(engine: Engine) -> None:
+    """Add canonical lifecycle audit fields to older SQLite databases."""
+    if engine.dialect.name != "sqlite":
+        return
+    publish_columns = {item["name"] for item in inspect(engine).get_columns("publish_records")}
+    rollback_columns = {item["name"] for item in inspect(engine).get_columns("rollback_records")}
+    with engine.begin() as connection:
+        if "reason" not in publish_columns:
+            connection.execute(text("ALTER TABLE publish_records ADD COLUMN reason TEXT"))
+        if "idempotency_key" not in rollback_columns:
+            connection.execute(text("ALTER TABLE rollback_records ADD COLUMN idempotency_key VARCHAR(255)"))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_rollback_records_idempotency_key "
+            "ON rollback_records (idempotency_key) WHERE idempotency_key IS NOT NULL"
         ))
 
 
@@ -228,6 +246,7 @@ def _upgrade_training_job_columns(engine: Engine) -> None:
         "config": "JSON NOT NULL DEFAULT '{}'",
         "config_summary": "JSON NOT NULL DEFAULT '{}'",
         "model_version_id": "VARCHAR(36)",
+        "log_entries": "JSON NOT NULL DEFAULT '[]'",
     }
     with engine.begin() as connection:
         for name, definition in additions.items():

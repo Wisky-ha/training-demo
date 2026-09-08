@@ -456,10 +456,14 @@ class ModelLifecycleService:
         self._validate_input_schema(version)
 
     def publish(self, version_id: str, *, confirmed: bool = False,
-                message: str | None = None, idempotency_key: str | None = None,
+                reason: str | None = None, idempotency_key: str | None = None,
+                # ``message`` is an internal compatibility spelling only; the
+                # HTTP contract exposes ``reason``.
+                message: str | None = None,
                 audit_context: AuditContext | None = None) -> tuple[ModelVersionORM, PublishRecordORM | None]:
         if not confirmed:
             raise ModelLifecycleError("发布生产模型需要二次确认", "PUBLISH_CONFIRMATION_REQUIRED")
+        operation_reason = reason if reason is not None else message
         version = self.get(version_id)
         if version is None:
             raise ModelNotFoundError()
@@ -505,14 +509,17 @@ class ModelLifecycleService:
             self._resolve_alerts(version.model_type, now, audit_context)
             release = PublishRecordORM(
                 model_version_id=version.id, published_version=version.version,
-                previous_current_version_id=previous_id, published_at=now, message=message,
+                previous_current_version_id=previous_id, published_at=now,
+                message=operation_reason, reason=operation_reason,
                 idempotency_key=idempotency_key,
             )
             self.session.add(release)
             record_audit_event(
                 self.session, event_type="MODEL_PUBLISHED", object_type="MODEL_VERSION",
                 object_id=version.id, model_type=version.model_type, model_version_id=version.id,
-                message="模型版本已发布到生产", metadata={"previous_current_version_id": previous_id},
+                message="模型版本已发布到生产",
+                metadata={"previous_current_version_id": previous_id,
+                          "reason": operation_reason, "idempotency_key": idempotency_key},
                 context=audit_context,
             )
             try:
@@ -550,6 +557,7 @@ class ModelLifecycleService:
 
     def rollback(self, model_id: str, *, target_version_id: str | None = None,
                  target_version: str | None = None, reason: str = "手动回滚",
+                 idempotency_key: str | None = None,
                  audit_context: AuditContext | None = None) -> tuple[RollbackRecordORM, ModelVersionORM]:
         requested = self.get(model_id)
         if requested is None:
@@ -569,19 +577,38 @@ class ModelLifecycleService:
         )
         with self._lock_for(requested.model_type):
             record = self._lock_type(requested.model_type)
+            if idempotency_key:
+                prior = self.session.scalar(select(RollbackRecordORM).where(
+                    RollbackRecordORM.idempotency_key == idempotency_key
+                ))
+                if prior is not None:
+                    if prior.model_type != requested.model_type or prior.rollback_from != requested.id:
+                        raise ModelLifecycleError("幂等键已用于其他模型回滚", "IDEMPOTENCY_KEY_CONFLICT")
+                    target = self.get(prior.rollback_to) if prior.rollback_to else None
+                    if target is None:
+                        raise ModelLifecycleError("幂等回滚记录缺少目标版本", "ROLLBACK_TARGET_NOT_FOUND")
+                    return prior, target
             current = self._current(record)
             target = None
             if target_version_id:
                 target = self.get(target_version_id)
+                # The old ``version_id`` adapter may carry a version label;
+                # canonical target_version_id remains an immutable resource id.
+                if target is None:
+                    target = self.session.scalar(select(ModelVersionORM).where(
+                        ModelVersionORM.model_type == requested.model_type,
+                        ModelVersionORM.version == target_version_id,
+                    ))
             elif target_version:
                 target = self.session.scalar(select(ModelVersionORM).where(
                     ModelVersionORM.model_type == requested.model_type,
                     ModelVersionORM.version == target_version,
                 ))
             else:
-                # The path may identify the target version, which makes the
-                # endpoint convenient for a UI's rollback button.
-                target = requested
+                # The canonical API requires an explicit target.  This branch
+                # remains only for direct legacy service callers; the router
+                # never supplies an implicit path target.
+                target = None
             if target is None:
                 raise ModelLifecycleError("回滚目标版本不存在", "ROLLBACK_TARGET_NOT_FOUND")
             if target.model_type != requested.model_type:
@@ -614,7 +641,7 @@ class ModelLifecycleService:
             rollback = RollbackRecordORM(
                 model_type=requested.model_type, rollback_from=source_id,
                 rollback_to=target.id, reason=reason, status=RollbackStatus.SUCCEEDED,
-                created_at=now, finished_at=now,
+                created_at=now, finished_at=now, idempotency_key=idempotency_key,
             )
             self.session.add(rollback)
             self.session.flush()
@@ -622,7 +649,9 @@ class ModelLifecycleService:
                 self.session, event_type="MODEL_ROLLBACK_SUCCEEDED", object_type="MODEL_VERSION",
                 object_id=target.id, model_type=requested.model_type,
                 model_version_id=target.id, message="模型回滚成功",
-                metadata={"rollback_id": rollback.id, "rollback_from": source_id}, context=audit_context,
+                metadata={"rollback_id": rollback.id, "rollback_from": source_id,
+                          "target_version_id": target.id, "reason": reason,
+                          "idempotency_key": idempotency_key}, context=audit_context,
             )
             try:
                 self.session.commit()
@@ -849,6 +878,19 @@ class ModelLifecycleService:
             version.id, reason, abnormal=abnormal, audit_context=audit_context
         )
 
+    @staticmethod
+    def _public_alert_status(alert: ModelAlertORM) -> AlertStatus:
+        if alert.status is AlertStatus.ACTIVE and alert.acknowledged_at is not None:
+            return AlertStatus.ACKNOWLEDGED
+        return alert.status
+
+    @classmethod
+    def alert_statistics(cls, alerts: list[ModelAlertORM]) -> dict[str, int]:
+        counts = {"total": len(alerts), "active": 0, "acknowledged": 0, "resolved": 0}
+        for alert in alerts:
+            counts[cls._public_alert_status(alert).value.lower()] += 1
+        return counts
+
     def alerts(self, *, model_type: ModelType | None = None,
                status: AlertStatus | None = None,
                active_only: bool = False) -> list[ModelAlertORM]:
@@ -864,12 +906,18 @@ class ModelLifecycleService:
                     (ModelAlertORM.status == AlertStatus.ACKNOWLEDGED)
                     | ((ModelAlertORM.status == AlertStatus.ACTIVE) & ModelAlertORM.acknowledged_at.is_not(None))
                 )
+            elif status is AlertStatus.ACTIVE:
+                statement = statement.where(
+                    ModelAlertORM.status == AlertStatus.ACTIVE,
+                    ModelAlertORM.acknowledged_at.is_(None),
+                )
             else:
                 statement = statement.where(ModelAlertORM.status == status)
         if active_only:
+            # Acknowledgement is handling, not recovery: both open states are
+            # still active for operational queries.
             statement = statement.where(
-                ModelAlertORM.status == AlertStatus.ACTIVE,
-                ModelAlertORM.acknowledged_at.is_(None),
+                ModelAlertORM.status.in_([AlertStatus.ACTIVE, AlertStatus.ACKNOWLEDGED])
             )
         return list(self.session.scalars(statement.order_by(ModelAlertORM.created_at.desc(), ModelAlertORM.id.desc())).all())
 
@@ -1002,6 +1050,7 @@ class ModelLifecycleService:
         return {"id": item.id, "model_type": item.model_type.value,
                 "rollback_from": item.rollback_from, "rollback_to": item.rollback_to,
                 "alert_id": item.alert_id, "reason": item.reason,
+                "idempotency_key": item.idempotency_key,
                 "status": item.status.value, "created_at": item.created_at,
                 "finished_at": item.finished_at}
 
