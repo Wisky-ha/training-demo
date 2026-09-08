@@ -10,6 +10,7 @@ import {
   type DatasetSplitResult,
   type DatasetUploadResult,
   type ModelEvaluation,
+  type JsonRecord,
   type ModelTypeCode,
   type ModelVersionDetail,
   type PreprocessTask,
@@ -302,6 +303,9 @@ function PreprocessStep({
   const datasetId = useAppStore((state) => state.workflow.datasetId)
   const task = useAppStore((state) => state.workflow.preprocessTask)
   const selected = useAppStore((state) => state.workflow.preprocessScriptId)
+  const splitId = useAppStore((state) => state.workflow.splitId)
+  const trainingJobId = useAppStore((state) => state.workflow.trainingJobId)
+  const modelVersionId = useAppStore((state) => state.workflow.modelVersionId)
   const setContext = useAppStore((state) => state.setWorkflowContext)
   const navigate = useNavigate()
   const [scripts, setScripts] = useState<ScriptContract[]>([])
@@ -330,7 +334,13 @@ function PreprocessStep({
     return () => { alive = false }
   }, [modelType])
 
+  const downstreamLocked = Boolean(splitId || trainingJobId || modelVersionId)
+
   const changeSelection = (nextSkip: boolean, scriptId: string | null = null) => {
+    if (downstreamLocked) {
+      setError('固定 80/20 划分已经完成，不能更换预处理；请从首页开始新的训练链路。')
+      return
+    }
     setSkip(nextSkip)
     setContext({
       preprocessScriptId: scriptId,
@@ -348,6 +358,10 @@ function PreprocessStep({
   }
 
   const uploadScript = async (file?: File) => {
+    if (downstreamLocked) {
+      setError('固定 80/20 划分已经完成，不能更换预处理；请从首页开始新的训练链路。')
+      return
+    }
     if (!file || !modelType) return
     if (!file.name.toLowerCase().endsWith('.py')) {
       setError('仅支持 .py 文件')
@@ -371,6 +385,10 @@ function PreprocessStep({
   }
 
   const run = async () => {
+    if (downstreamLocked) {
+      setError('固定 80/20 划分已经完成，不能重新执行预处理；请从首页开始新的训练链路。')
+      return
+    }
     if (!datasetId || !modelType || (!skip && !selected)) return
     setRunning(true)
     setError(null)
@@ -406,6 +424,7 @@ function PreprocessStep({
         <label className={`skip-option${skip ? ' checked' : ''}`}>
           <input
             checked={skip}
+            disabled={downstreamLocked}
             onChange={(event) => changeSelection(event.target.checked, event.target.checked ? null : selected)}
             type="checkbox"
           />
@@ -413,7 +432,7 @@ function PreprocessStep({
         </label>
         <label className="secondary-button action-button">
           上传预处理脚本
-          <input aria-label="上传预处理脚本" accept=".py,text/x-python" hidden onChange={(event) => void uploadScript(event.target.files?.[0])} type="file" />
+          <input aria-label="上传预处理脚本" accept=".py,text/x-python" disabled={downstreamLocked} hidden onChange={(event) => void uploadScript(event.target.files?.[0])} type="file" />
         </label>
       </div>
       {loading && <div className="loading-line"><span className="spinner" />读取 ENABLED 脚本…</div>}
@@ -422,6 +441,7 @@ function PreprocessStep({
           {scripts.map((script) => (
             <button
               className={`script-option${selected === script.id ? ' selected' : ''}`}
+              disabled={downstreamLocked}
               key={script.id}
               onClick={() => changeSelection(false, script.id)}
               type="button"
@@ -433,6 +453,7 @@ function PreprocessStep({
           {!scripts.length && <div className="empty-state compact">暂无 ENABLED 预处理脚本</div>}
         </div>
       )}
+      {downstreamLocked && <InfoBox tone="warning">固定 80/20 划分已绑定当前预处理任务，不能在本链路中更换预处理。</InfoBox>}
       {uploadingScript && <div className="loading-line"><span className="spinner" />上传脚本中…</div>}
       {task && (
         <div className="stage-result">
@@ -456,8 +477,8 @@ function PreprocessStep({
       <StepActions
         back={back}
         next={run}
-        nextDisabled={restoring || running || uploadingScript || (!skip && !selected) || !datasetId}
-        nextLabel={running ? '执行中…' : taskStatus === 'SUCCEEDED' || taskStatus === 'SKIPPED' ? '重新执行' : '执行并继续'}
+        nextDisabled={restoring || running || uploadingScript || downstreamLocked || (!skip && !selected) || !datasetId}
+        nextLabel={downstreamLocked ? '固定划分不可更改' : running ? '执行中…' : taskStatus === 'SUCCEEDED' || taskStatus === 'SKIPPED' ? '重新执行' : '执行并继续'}
       />
     </section>
   )
@@ -487,7 +508,11 @@ function SplitStep({
   }, [complete, datasetId, taskId])
 
   useEffect(() => {
-    if (!datasetId || !taskId || split || restoring) return
+    if (split) {
+      setLoading(false)
+      return
+    }
+    if (!datasetId || !taskId || restoring) return
     let alive = true
     setLoading(true)
     apiClient.getDatasetSplit(datasetId)
@@ -950,7 +975,9 @@ function PublishStep({ back, restoring }: { back: () => void; restoring: boolean
         time_column: workflow.dataset?.time_column,
         feature_columns: workflow.dataset?.feature_columns,
         target_column: workflow.dataset?.target_column,
-        metrics: (workflow.evaluation?.metrics ?? {}) as Record<string, import('../types/contracts').JsonValue>,
+        // The backend stores the complete evaluation envelope in metrics;
+        // sending only the flat metric set would erase chart/comparison data.
+        metrics: (workflow.evaluation ?? {}) as unknown as JsonRecord,
       })
       setContext({ modelVersion: { ...model, status: 'READY' }, modelVersionId: model.id })
       setSavedLocally(true)
@@ -1238,6 +1265,8 @@ export function WorkflowPage() {
   const workflow = useAppStore((state) => state.workflow)
   const setContext = useAppStore((state) => state.setWorkflowContext)
   const setModelType = useAppStore((state) => state.setModelType)
+  const startNewWorkflow = useAppStore((state) => state.startNewWorkflow)
+  const resetWorkflow = useAppStore((state) => state.resetWorkflow)
   const [guardNotice, setGuardNotice] = useState<{ message: string; target: WorkflowStepId } | null>(null)
   const [restoreAttempt, setRestoreAttempt] = useState(0)
   const [restoreState, setRestoreState] = useState<RestoreState>({
@@ -1254,20 +1283,142 @@ export function WorkflowPage() {
       ? candidate as ModelTypeCode
       : null
   }, [searchParams])
-  const queryChangingModel = Boolean(queryModel && queryModel !== workflow.modelType)
+  const queryDatasetId = searchParams.get('dataset_id')
+  const queryTaskId = searchParams.get('preprocessing_task_id')
+  const querySplitId = searchParams.get('split_id')
+  const queryJobId = searchParams.get('training_job_id')
+  const queryStartsNew = searchParams.get('new') === '1' || Boolean(queryModel)
+  const queryContextActive = Boolean(queryStartsNew || queryDatasetId || queryTaskId || querySplitId || queryJobId)
+  const queryContextKey = useMemo(() => JSON.stringify([
+    queryModel, queryDatasetId, queryTaskId, querySplitId, queryJobId, queryStartsNew,
+  ]), [queryDatasetId, queryJobId, queryModel, querySplitId, queryStartsNew, queryTaskId])
+  const [queryRestore, setQueryRestore] = useState<{ key: string | null; loading: boolean; error: string | null }>({
+    key: null,
+    loading: false,
+    error: null,
+  })
+  const queryHydrating = queryContextActive
+    && (queryRestore.key !== queryContextKey || queryRestore.loading)
 
   useEffect(() => {
-    if (!queryModel || queryModel === workflow.modelType) return
-    restoreRun.current += 1
+    if (!queryContextActive) {
+      if (queryRestore.key !== queryContextKey || queryRestore.error) {
+        setQueryRestore({ key: queryContextKey, loading: false, error: null })
+      }
+      return
+    }
+    if (queryRestore.key === queryContextKey) return
+
+    const runId = ++restoreRun.current
+    let alive = true
     setGuardNotice(null)
-    setModelType(queryModel)
-  }, [queryModel, setModelType, workflow.modelType])
+    setQueryRestore({ key: queryContextKey, loading: true, error: null })
+
+    void (async () => {
+      try {
+        if (queryStartsNew && !queryDatasetId && !queryTaskId && !querySplitId && !queryJobId) {
+          startNewWorkflow(queryModel)
+        } else {
+          resetWorkflow()
+          let patch: Partial<WorkflowDraft>
+          if (queryJobId) {
+            const job = await apiClient.getTrainingJob(queryJobId)
+            const dataset = await apiClient.getDataset(job.dataset_id)
+            const task = job.preprocessing_task_id
+              ? await apiClient.getPreprocessingTask(job.preprocessing_task_id)
+              : null
+            const split = await apiClient.getDatasetSplit(job.dataset_id)
+            if (queryModel && queryModel !== job.model_type) throw new Error('训练任务与 model_type 不匹配。')
+            if (task && (task.dataset_id !== dataset.id || task.model_type !== job.model_type)) {
+              throw new Error('训练任务与预处理任务的资源 ID 链不匹配。')
+            }
+            if (split.preprocessing_task_id !== (task?.id ?? null)) {
+              throw new Error('训练任务与数据集划分的 preprocessing_task_id 不匹配。')
+            }
+            patch = {
+              modelType: job.model_type,
+              datasetId: dataset.id,
+              dataset,
+              preprocessScriptId: task?.preprocess_script_id ?? null,
+              preprocessTaskId: task?.id ?? null,
+              preprocessTask: task,
+              splitId: split.id,
+              split,
+              trainScriptId: job.train_script_id,
+              trainingJobId: job.id,
+              trainingJob: job,
+              modelVersionId: job.model_version_id,
+              currentStep: 'train',
+            }
+          } else if (queryTaskId) {
+            const task = await apiClient.getPreprocessingTask(queryTaskId)
+            const dataset = await apiClient.getDataset(task.dataset_id)
+            if (queryModel && queryModel !== task.model_type) throw new Error('预处理任务与 model_type 不匹配。')
+            patch = {
+              modelType: task.model_type,
+              datasetId: dataset.id,
+              dataset,
+              preprocessScriptId: task.preprocess_script_id,
+              preprocessTaskId: task.id,
+              preprocessTask: task,
+              currentStep: 'preprocess',
+            }
+          } else if (querySplitId) {
+            if (!queryDatasetId) throw new Error('split 深链缺少 dataset_id，无法按数据集读取固定划分。')
+            const dataset = await apiClient.getDataset(queryDatasetId)
+            const split = await apiClient.getDatasetSplit(queryDatasetId)
+            if (split.id !== querySplitId || split.dataset_id !== dataset.id) throw new Error('数据集划分与 split_id 不匹配。')
+            const task = split.preprocessing_task_id
+              ? await apiClient.getPreprocessingTask(split.preprocessing_task_id)
+              : null
+            const modelType = queryModel ?? task?.model_type ?? null
+            if (!modelType) throw new Error('split 深链缺少可恢复的 model_type。')
+            if (task && task.dataset_id !== dataset.id) throw new Error('数据集划分与预处理任务不匹配。')
+            patch = {
+              modelType,
+              datasetId: dataset.id,
+              dataset,
+              preprocessScriptId: task?.preprocess_script_id ?? null,
+              preprocessTaskId: task?.id ?? null,
+              preprocessTask: task,
+              splitId: split.id,
+              split,
+              currentStep: 'split',
+            }
+          } else if (queryDatasetId) {
+            const dataset = await apiClient.getDataset(queryDatasetId)
+            patch = {
+              modelType: queryModel,
+              datasetId: dataset.id,
+              dataset,
+              currentStep: queryModel ? 'upload' : 'model-type',
+            }
+          } else {
+            throw new Error('缺少可恢复的资源 ID。')
+          }
+          if (!alive || restoreRun.current !== runId) return
+          setContext(patch)
+        }
+        if (alive && restoreRun.current === runId) {
+          setQueryRestore({ key: queryContextKey, loading: false, error: null })
+        }
+      } catch (reason) {
+        if (alive && restoreRun.current === runId) {
+          setQueryRestore({ key: queryContextKey, loading: false, error: errorMessage(reason) })
+        }
+      }
+    })()
+
+    return () => { alive = false }
+  }, [queryContextActive, queryContextKey, queryDatasetId, queryJobId, queryModel,
+    querySplitId, queryStartsNew, queryTaskId, resetWorkflow, restoreAttempt, setContext,
+    startNewWorkflow])
 
   const snapshot = workflowSnapshot(workflow)
   const hydrationKey = snapshotKey(snapshot)
 
   useEffect(() => {
-    if (queryChangingModel) return
+    if (queryHydrating) return
     if (!snapshot.modelType) {
       restoreRun.current += 1
       setRestoreState({ key: hydrationKey, loading: false, error: null, blockedStep: null })
@@ -1527,9 +1678,9 @@ export function WorkflowPage() {
     })()
 
     return () => { alive = false }
-  }, [hydrationKey, queryChangingModel, restoreAttempt, setContext])
+  }, [hydrationKey, queryHydrating, restoreAttempt, setContext])
 
-  const hydrating = queryChangingModel
+  const hydrating = queryHydrating
     || Boolean(workflow.modelType && (restoreState.key !== hydrationKey || restoreState.loading))
   const gate = useCallback(
     (step: WorkflowStepId) => workflowGate(workflow, step, restoreState),
@@ -1627,7 +1778,12 @@ export function WorkflowPage() {
 
   const activeIndex = workflowSteps.findIndex((step) => step.id === requested)
   const content = requested === 'model-type'
-    ? <ModelTypeStep select={(modelType) => { setGuardNotice(null); setModelType(modelType); navigate('/workflow/upload') }} />
+    ? <ModelTypeStep select={(modelType) => {
+      setGuardNotice(null)
+      if (queryDatasetId && !queryModel) setContext({ modelType, currentStep: 'upload' })
+      else setModelType(modelType)
+      navigate('/workflow/upload')
+    }} />
     : requested === 'upload'
       ? <UploadStep back={() => go('model-type')} restoring={hydrating} setDataset={setDataset} />
       : requested === 'preprocess'
@@ -1650,6 +1806,7 @@ export function WorkflowPage() {
               : <PublishStep back={() => go('evaluate')} restoring={hydrating} />
 
   const retryRestore = () => {
+    if (queryContextActive) setQueryRestore({ key: null, loading: false, error: null })
     setRestoreState((state) => ({ ...state, loading: true, error: null, blockedStep: null }))
     setRestoreAttempt((value) => value + 1)
   }
@@ -1664,6 +1821,7 @@ export function WorkflowPage() {
         </div>
       </div>
       {hydrating && <div className="loading-line" role="status"><span className="spinner" />正在按资源 ID 恢复训练上下文…</div>}
+      {queryRestore.error && !queryRestore.loading && <ErrorBox message={queryRestore.error} onRetry={retryRestore} />}
       {restoreState.error && !restoreState.loading && <ErrorBox message={restoreState.error} onRetry={retryRestore} />}
       {guardNotice && <ErrorBox message={guardNotice.message} />}
       <section className="step-shell" aria-label="训练流程步骤">

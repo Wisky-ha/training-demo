@@ -190,6 +190,11 @@ def save_existing_model(model_id: str, body: ModelSaveRequest, request: Request,
                       "metrics", "preprocess_used", "preprocessor_state", "health_status"):
             value = getattr(body, field)
             if value is not None and value != [] and value != {}:
+                if field == "metrics":
+                    # A legacy caller may submit only the flat metric set;
+                    # preserve the immutable evaluation chart/comparison
+                    # envelope already produced by training.
+                    value = {**dict(existing.metrics or {}), **value}
                 setattr(existing, field, value)
         existing.status = body.status
         record_audit_event(

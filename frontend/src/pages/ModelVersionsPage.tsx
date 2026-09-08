@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useSearchParams } from 'react-router-dom'
 import { ApiError, apiClient, createIdempotencyKey } from '../api'
 import { MODEL_TYPE_CODES, MODEL_TYPE_NAMES, type ModelAlert, type ModelTypeCode, type ModelVersionDetail, type ModelVersionSummary } from '../types/contracts'
 
@@ -158,6 +159,23 @@ function trainingFinished(model: ModelVersionSummary, finishedAt: Record<string,
 
 function isHealthy(model: ModelVersionSummary) {
   return healthCode(model) === 'HEALTHY'
+}
+
+function canMarkAbnormal(model: ModelVersionSummary) {
+  const lifecycle = lifecycleCode(model)
+  return !model.is_baseline
+    && lifecycle !== null
+    && ['READY', 'PUBLISHED', 'RETIRED'].includes(lifecycle)
+    && healthCode(model) !== 'ABNORMAL'
+}
+
+function canRollbackTarget(model: ModelVersionSummary, current: ModelVersionSummary | null) {
+  const lifecycle = lifecycleCode(model)
+  return Boolean(current)
+    && current!.id !== model.id
+    && ['PUBLISHED', 'RETIRED'].includes(lifecycle ?? '')
+    && Boolean(model.published_at)
+    && isHealthy(model)
 }
 
 function lifecycleClass(model: ModelVersionSummary) {
@@ -328,9 +346,15 @@ function VersionDetails({
 }
 
 export function ModelVersionsPage() {
+  const [searchParams] = useSearchParams()
+  const location = useLocation()
+  const queryType = searchParams.get('model_type')
+  const queryVersionId = location.hash.replace(/^#/, '')
+    ? decodeURIComponent(location.hash.replace(/^#/, ''))
+    : null
   const [models, setModels] = useState<ModelVersionSummary[]>([])
   const [alerts, setAlerts] = useState<ModelAlert[]>([])
-  const [selectedType, setSelectedType] = useState<ModelTypeCode>('electric_load')
+  const [selectedType, setSelectedType] = useState<ModelTypeCode>(() => isModelType(queryType) ? queryType : 'electric_load')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [trainingFinishedAt, setTrainingFinishedAt] = useState<Record<string, string | null>>({})
   const [scriptNames, setScriptNames] = useState<Record<string, string | null>>({})
@@ -356,6 +380,15 @@ export function ModelVersionsPage() {
   const trainingRequests = useRef(new Map<string, Promise<string | null>>())
   const scriptCache = useRef<Record<string, string | null>>({})
   const scriptRequests = useRef(new Map<string, Promise<string | null>>())
+
+  useEffect(() => {
+    if (isModelType(queryType)) setSelectedType(queryType)
+    if (queryVersionId) {
+      setSelectedId(queryVersionId)
+      setDetail(null)
+      setDetailError(null)
+    }
+  }, [queryType, queryVersionId])
 
   const fetchTrainingFinishedAt = useCallback((model: ModelVersionSummary, force = false) => {
     const jobId = model.training_job_id
@@ -511,8 +544,8 @@ export function ModelVersionsPage() {
     if (!selected || actionLoading) return
     if (action === 'publish' && !(lifecycleCode(selected) === 'READY' && isHealthy(selected))) return
     if (action === 'offline' && !(lifecycleCode(selected) === 'PUBLISHED' && selected.is_current === true)) return
-    if (action === 'abnormal' && healthCode(selected) === 'ABNORMAL') return
-    if (action === 'rollback' && !(current && current.id !== selected.id && isHealthy(selected))) return
+    if (action === 'abnormal' && !canMarkAbnormal(selected)) return
+    if (action === 'rollback' && !canRollbackTarget(selected, current)) return
     setReason('')
     setReasonError(null)
     setError(null)
@@ -528,8 +561,12 @@ export function ModelVersionsPage() {
       setReasonError(operation.action === 'publish' ? '发布原因不能为空' : operation.action === 'rollback' ? '回滚原因不能为空' : '异常原因不能为空')
       return
     }
-    if (operation.action === 'rollback' && (!operation.current || operation.current.id === operation.model.id || !isHealthy(operation.model))) {
-      setReasonError('回滚目标必须不是当前版本且健康')
+    if (operation.action === 'rollback' && !canRollbackTarget(operation.model, operation.current)) {
+      setReasonError('回滚目标必须是已发布历史版本、已发布且健康')
+      return
+    }
+    if (operation.action === 'abnormal' && !canMarkAbnormal(operation.model)) {
+      setReasonError('只有 READY、PUBLISHED 或 RETIRED 的非基线版本可以标记异常')
       return
     }
 
@@ -568,7 +605,13 @@ export function ModelVersionsPage() {
       if (!refreshResult.ok && !refreshResult.stale) setError('操作已成功，但部分状态刷新失败，请手动刷新。')
       dispatchRegistryUpdated(operation.action, operation.model.id)
     } catch (reasonValue) {
-      if (mounted.current) setError(errorMessage(reasonValue))
+      if (mounted.current) {
+        const message = errorMessage(reasonValue)
+        if (operation.action === 'abnormal') {
+          await load()
+        }
+        if (mounted.current) setError(message)
+      }
     } finally {
       operationInFlight.current = false
       if (mounted.current) setActionLoading(false)
@@ -577,8 +620,8 @@ export function ModelVersionsPage() {
 
   const canPublish = Boolean(selected && lifecycleCode(selected) === 'READY' && isHealthy(selected))
   const canOffline = Boolean(selected && lifecycleCode(selected) === 'PUBLISHED' && selected.is_current === true)
-  const canAbnormal = Boolean(selected && healthCode(selected) !== 'ABNORMAL')
-  const canRollback = Boolean(selected && current && current.id !== selected.id && isHealthy(selected))
+  const canAbnormal = Boolean(selected && canMarkAbnormal(selected))
+  const canRollback = Boolean(selected && canRollbackTarget(selected, current))
 
   return <div className="page-content model-registry-page">
     <div className="registry-header">

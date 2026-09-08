@@ -116,8 +116,8 @@ function detail(model: ModelVersionSummary): ModelVersionDetail {
   return { ...model, input_schema: {}, evaluation: null }
 }
 
-function renderPage() {
-  return render(<MemoryRouter><ModelVersionsPage /></MemoryRouter>)
+function renderPage(path = '/') {
+  return render(<MemoryRouter initialEntries={[path]}><ModelVersionsPage /></MemoryRouter>)
 }
 
 function mockReads(models: ModelVersionSummary[]) {
@@ -177,6 +177,16 @@ describe('ModelVersionsPage', () => {
     expect(apiClient.getTrainingJob).toHaveBeenCalledWith('job-v2')
   })
 
+  it('consumes the model type query and hash version deep link', async () => {
+    const model = modelFixture({ id: 'heat-model', model_type: 'heating_cooling_load', version: 'h1' })
+    mockReads([model])
+
+    renderPage('/models?model_type=heating_cooling_load#heat-model')
+
+    expect(await screen.findByRole('heading', { name: '冷热负荷预测 · 版本列表' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'h1' })).toBeTruthy()
+  })
+
   it('enforces lifecycle and independent health gates without defaulting missing health to healthy', async () => {
     const candidate = modelFixture()
     const current = currentFixture()
@@ -190,7 +200,7 @@ describe('ModelVersionsPage', () => {
     expect(screen.getByRole('button', { name: '发布版本' })).not.toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '下线' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '标记异常' })).not.toHaveProperty('disabled', true)
-    expect(screen.getByRole('button', { name: '回滚到所选版本' })).not.toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '回滚到所选版本' })).toHaveProperty('disabled', true)
 
     fireEvent.click(screen.getByRole('button', { name: 'v1' }))
     expect(screen.getByRole('button', { name: '发布版本' })).toHaveProperty('disabled', true)

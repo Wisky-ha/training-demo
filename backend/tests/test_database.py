@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import create_engine, inspect, select
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -140,6 +140,58 @@ def test_initialize_database_recreates_audit_table_without_touching_existing_tab
         assert check.scalar(select(ModelTypeORM).where(
             ModelTypeORM.code == ModelType.INTEGRATED_ENERGY
         )) is not None
+
+
+def test_initialize_database_upgrades_legacy_health_status_constraint():
+    """Existing SQLite rows accept the new explicit UNKNOWN health state."""
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE model_versions (
+                id VARCHAR(36) PRIMARY KEY,
+                model_type VARCHAR(64) NOT NULL,
+                version VARCHAR(100) NOT NULL,
+                model_path VARCHAR(1024) NOT NULL,
+                training_job_id VARCHAR(36),
+                status VARCHAR(9) NOT NULL DEFAULT 'READY',
+                health_status VARCHAR(8) NOT NULL DEFAULT 'HEALTHY',
+                is_baseline BOOLEAN NOT NULL DEFAULT 0,
+                is_current BOOLEAN NOT NULL DEFAULT 0,
+                CONSTRAINT healthstatus_enum
+                    CHECK (health_status IN ('HEALTHY', 'ABNORMAL'))
+            )
+            """
+        )
+
+    initialize_database(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO model_versions "
+                "(id, model_type, version, model_path, status, health_status) "
+                "VALUES (:id, :model_type, :version, :model_path, :status, :health_status)"
+            ),
+            {
+                "id": "legacy-unknown",
+                "model_type": ModelType.ELECTRIC_LOAD.value,
+                "version": "v-unknown",
+                "model_path": "legacy/v-unknown",
+                "status": "READY",
+                "health_status": "UNKNOWN",
+            },
+        )
+
+    with engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT health_status FROM model_versions WHERE id = 'legacy-unknown'")
+        ) == "UNKNOWN"
+    engine.dispose()
 
 
 def test_core_relationships_and_json_fields(session: Session):

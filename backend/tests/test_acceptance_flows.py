@@ -378,6 +378,13 @@ def test_real_vertical_chain_survives_refresh_and_audit_pagination(acceptance_ap
         "model_type": "electric_load", "status": "READY",
     })
     assert saved.status_code == 200, saved.text
+    partial_save = client.post(f"/api/models/{model_version_id}/save", json={
+        "model_type": "electric_load", "status": "READY", "metrics": {"mae": 999.0},
+    })
+    assert partial_save.status_code == 200, partial_save.text
+    preserved_metrics = partial_save.json()["metrics"]
+    assert preserved_metrics["mae"] == 999.0
+    assert "chart_data" in preserved_metrics and "model_comparison" in preserved_metrics
     published = publish(client, model_version_id, reason="首个真实训练版本", idempotency_key="vertical-publish-v1")
     assert published.status_code == 200, published.text
     replay = publish(client, model_version_id, reason="首个真实训练版本", idempotency_key="vertical-publish-v1")

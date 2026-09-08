@@ -216,7 +216,7 @@ export function HomePage() {
               <p className="eyebrow">MODEL REGISTRY / 03 MODELS</p>
               <h1 className="page-title">模型总览</h1>
             </div>
-            <Link className="primary-button action-button" to="/workflow/model-type">开始训练　→</Link>
+            <Link className="primary-button action-button" to="/workflow/model-type?new=1">开始训练　→</Link>
           </div>
 
           <section aria-label="模型统计" className="summary-stat-grid home-status-strip">
@@ -247,7 +247,7 @@ export function HomePage() {
               <td><span className="version-value">{model?.version ?? '未指定'}</span></td>
               <td>{formatDate(model ? trainingFinishedAt[model.id] : null)}</td>
               <td><div className="home-state"><span className={`status-badge ${lifecycleClass(model)}`}>生命周期：{lifecycleLabel(model)}</span><span className={`status-badge ${healthClass(model)}`}>健康：{healthLabel(model)}</span></div></td>
-              <td><div className="row-actions"><Link className="text-button" to={`/models?model_type=${code}`}>版本</Link><Link className="text-button" to={`/workflow/model-type?model=${code}`}>训练</Link></div></td>
+              <td><div className="row-actions"><Link className="text-button" to={`/models?model_type=${code}`}>版本</Link><Link className="text-button" to={`/workflow/model-type?model=${code}&new=1`}>训练</Link></div></td>
             </tr>)}</tbody></table></div>}
           </section>
 

@@ -44,6 +44,11 @@ function operatorValue(event: AuditEvent): string {
   return nonEmpty(event.operator_name) ?? nonEmpty(event.operator_id) ?? UNKNOWN_TEXT
 }
 
+function metadataId(event: AuditEvent, key: string): string | null {
+  const value = event.metadata?.[key]
+  return typeof value === 'string' ? nonEmpty(value) : null
+}
+
 function objectIdValue(event: AuditEvent, objectType: string): string | null {
   const objectId = nonEmpty(event.object_id)
   if (objectId) return objectId
@@ -57,8 +62,8 @@ function objectLink(event: AuditEvent): ObjectLink {
   const id = objectIdValue(event, objectType)
   if (!id) return null
 
+  const modelType = nonEmpty(event.model_type)
   if (objectType === 'MODEL_VERSION') {
-    const modelType = nonEmpty(event.model_type)
     const query = modelType ? `?model_type=${encodeURIComponent(modelType)}` : ''
     return { href: `/models${query}#${encodeURIComponent(id)}`, id }
   }
@@ -72,7 +77,9 @@ function objectLink(event: AuditEvent): ObjectLink {
     return { href: `/workflow/preprocess?preprocessing_task_id=${encodeURIComponent(id)}`, id }
   }
   if (objectType === 'DATASET_SPLIT') {
-    return { href: `/workflow/split?split_id=${encodeURIComponent(id)}`, id }
+    const datasetId = metadataId(event, 'dataset_id')
+    const datasetQuery = datasetId ? `&dataset_id=${encodeURIComponent(datasetId)}` : ''
+    return { href: `/workflow/split?split_id=${encodeURIComponent(id)}${datasetQuery}`, id }
   }
   return null
 }

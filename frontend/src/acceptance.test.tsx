@@ -332,7 +332,10 @@ describe('workflow acceptance flows', () => {
     renderApp('/workflow/publish')
 
     fireEvent.click(await screen.findByRole('button', { name: '保存候选版本' }))
-    await waitFor(() => expect(save).toHaveBeenCalledWith('model-1', expect.objectContaining({ status: 'READY' })))
+    await waitFor(() => expect(save).toHaveBeenCalledWith('model-1', expect.objectContaining({
+      status: 'READY',
+      metrics: expect.objectContaining({ chart_data: [], error_data: [], model_comparison: expect.any(Object) }),
+    })))
     fireEvent.click(await screen.findByRole('button', { name: '发布' }))
     fireEvent.change(screen.getByLabelText('发布原因'), { target: { value: '验证通过，切换生产版本' } })
     fireEvent.click(screen.getByRole('button', { name: '确认发布' }))
@@ -444,6 +447,52 @@ describe('workflow acceptance flows', () => {
     expect(useAppStore.getState().workflow).toMatchObject({
       modelType: 'heating_cooling_load', datasetId: null, preprocessTaskId: null, splitId: null,
       trainingJobId: null, modelVersionId: null, evaluation: null,
+    })
+  })
+
+  it('starts a fresh chain when the same model type is selected again', async () => {
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', preprocessTaskId: 'task-1', splitId: 'split-1',
+      trainingJobId: 'job-1', modelVersionId: 'model-1', currentStep: 'publish',
+    })
+    renderApp('/workflow/model-type?model=electric_load&new=1')
+
+    await waitFor(() => expect(useAppStore.getState().workflow.modelType).toBe('electric_load'))
+    expect(useAppStore.getState().workflow).toMatchObject({
+      datasetId: null, preprocessTaskId: null, splitId: null,
+      trainingJobId: null, modelVersionId: null, currentStep: 'model-type',
+    })
+  })
+
+  it('enables the split continuation after refreshing a restored split', async () => {
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', preprocessTaskId: 'task-1', splitId: 'split-1',
+      currentStep: 'split',
+    })
+    vi.spyOn(apiClient, 'getDataset').mockResolvedValue(datasetFixture())
+    vi.spyOn(apiClient, 'getPreprocessingTask').mockResolvedValue(preprocessFixture())
+    vi.spyOn(apiClient, 'getDatasetSplit').mockResolvedValue(splitFixture())
+    renderApp('/workflow/split')
+
+    const next = await screen.findByRole('button', { name: '继续选择训练脚本' }) as HTMLButtonElement
+    await waitFor(() => expect(next.disabled).toBe(false))
+  })
+
+  it('hydrates a training-job deep link into the full workflow ID chain', async () => {
+    const job = trainingFixture()
+    vi.spyOn(apiClient, 'getTrainingJob').mockResolvedValue(job)
+    vi.spyOn(apiClient, 'getDataset').mockResolvedValue(datasetFixture())
+    vi.spyOn(apiClient, 'getPreprocessingTask').mockResolvedValue(preprocessFixture())
+    vi.spyOn(apiClient, 'getDatasetSplit').mockResolvedValue(splitFixture())
+    vi.spyOn(apiClient, 'getModel').mockResolvedValue({ ...baseModel(), input_schema: {}, evaluation: null })
+    vi.spyOn(apiClient, 'getTrainingJobEvaluation').mockResolvedValue(evaluationFixture())
+    vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [], pagination: { page: 1, page_size: 20, total: 0, total_pages: 0 } })
+    renderApp('/workflow/train?training_job_id=job-1')
+
+    await waitFor(() => expect(useAppStore.getState().workflow.trainingJobId).toBe('job-1'))
+    expect(useAppStore.getState().workflow).toMatchObject({
+      modelType: 'electric_load', datasetId: 'dataset-1', preprocessTaskId: 'task-1',
+      splitId: 'split-1', trainingJobId: 'job-1', modelVersionId: 'model-1',
     })
   })
 

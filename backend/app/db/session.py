@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Generator
 from functools import lru_cache
 
@@ -110,6 +111,7 @@ def initialize_database(
     _upgrade_rollback_record_columns(active_engine)
     _upgrade_preprocessing_task_columns(active_engine)
     _upgrade_model_version_columns(active_engine)
+    _upgrade_model_version_health_constraint(active_engine)
     _upgrade_model_alert_columns(active_engine)
     _upgrade_publish_record_columns(active_engine)
     return active_engine
@@ -215,6 +217,80 @@ def _upgrade_model_version_columns(engine: Engine) -> None:
                 connection.execute(text(
                     f"ALTER TABLE model_versions ADD COLUMN {name} {definition}"
                 ))
+
+
+def _upgrade_model_version_health_constraint(engine: Engine) -> None:
+    """Permit UNKNOWN on SQLite databases created before health was tri-state.
+
+    SQLite cannot alter a CHECK constraint in place. Older deployments have a
+    ``healthstatus_enum`` constraint containing only HEALTHY/ABNORMAL, while
+    the current contract must persist UNKNOWN for rows without health
+    evidence. Rebuild only this table, copying every existing column and
+    recreating its explicit indexes; no rows or resource IDs are rewritten.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.connect() as connection:
+        table_sql = connection.scalar(
+            text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'model_versions'")
+        )
+        if not table_sql or not re.search(
+            r"health_status\s+IN\s*\(\s*'HEALTHY'\s*,\s*'ABNORMAL'\s*\)",
+            table_sql,
+            flags=re.IGNORECASE,
+        ):
+            return
+        columns = [
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(model_versions)")
+        ]
+        if "health_status" not in columns:
+            return
+        indexes = list(connection.exec_driver_sql(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type = 'index' AND tbl_name = 'model_versions' AND sql IS NOT NULL"
+        ))
+        # End the implicit read transaction before changing SQLite's foreign
+        # key pragma. The migration is serialized by application startup.
+        connection.commit()
+        connection.exec_driver_sql("PRAGMA foreign_keys = OFF")
+        connection.commit()
+        try:
+            with connection.begin():
+                upgraded_sql = re.sub(
+                    r"(?i)(CREATE\s+TABLE\s+)([\"]?model_versions[\"]?)",
+                    r"\1model_versions_health_upgrade",
+                    table_sql,
+                    count=1,
+                )
+                upgraded_sql = re.sub(
+                    r"health_status\s+IN\s*\(\s*'HEALTHY'\s*,\s*'ABNORMAL'\s*\)",
+                    "health_status IN ('HEALTHY', 'ABNORMAL', 'UNKNOWN')",
+                    upgraded_sql,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                connection.exec_driver_sql(upgraded_sql)
+                quoted_columns = ", ".join(
+                    f'"{column.replace(chr(34), chr(34) * 2)}"' for column in columns
+                )
+                connection.exec_driver_sql(
+                    f"INSERT INTO model_versions_health_upgrade ({quoted_columns}) "
+                    f"SELECT {quoted_columns} FROM model_versions"
+                )
+                for name, _ in indexes:
+                    safe_name = name.replace(chr(34), chr(34) * 2)
+                    connection.exec_driver_sql(f'DROP INDEX IF EXISTS "{safe_name}"')
+                connection.exec_driver_sql("DROP TABLE model_versions")
+                connection.exec_driver_sql(
+                    "ALTER TABLE model_versions_health_upgrade RENAME TO model_versions"
+                )
+                for _, index_sql in indexes:
+                    connection.exec_driver_sql(index_sql)
+        finally:
+            connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+            connection.commit()
 
 
 def _upgrade_model_alert_columns(engine: Engine) -> None:

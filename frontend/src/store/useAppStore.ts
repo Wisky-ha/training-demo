@@ -14,6 +14,7 @@ interface AppState {
   setWorkflowStep: (step: WorkflowStepId) => void
   setWorkflowContext: (context: Partial<WorkflowDraft>) => void
   setModelType: (modelType: WorkflowDraft['modelType']) => void
+  startNewWorkflow: (modelType?: WorkflowDraft['modelType']) => void
   resetWorkflow: () => void
 }
 
@@ -132,9 +133,9 @@ export const useAppStore = create<AppState>()(
           return { workflow }
         }),
       setModelType: (modelType) =>
-        set((state) => state.workflow.modelType === modelType
-          ? { workflow: state.workflow }
-          : { workflow: { ...emptyWorkflow(), modelType, currentStep: modelType ? 'upload' : 'model-type' } }),
+        set({ workflow: { ...emptyWorkflow(), modelType, currentStep: modelType ? 'upload' : 'model-type' } }),
+      startNewWorkflow: (modelType = null) =>
+        set({ workflow: { ...emptyWorkflow(), modelType, currentStep: modelType ? 'upload' : 'model-type' } }),
       resetWorkflow: () => set({ workflow: emptyWorkflow() }),
     }),
     {
