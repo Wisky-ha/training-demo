@@ -121,7 +121,14 @@ describe('ApiClient contracts', () => {
     })
     expect(fetchImpl.mock.calls[0][0]).toContain('/api/audit-events?')
     expect(fetchImpl.mock.calls[0][0]).toContain('from=2025-01-01T00%3A00%3A00Z')
+    expect(fetchImpl.mock.calls[0][0]).toContain('to=2025-01-02T00%3A00%3A00Z')
+    expect(fetchImpl.mock.calls[0][0]).toContain('model_type=electric_load')
+    expect(fetchImpl.mock.calls[0][0]).toContain('event_type=MODEL_SAVED')
+    expect(fetchImpl.mock.calls[0][0]).toContain('object_type=MODEL_VERSION')
+    expect(fetchImpl.mock.calls[0][0]).toContain('result=SUCCESS')
+    expect(fetchImpl.mock.calls[0][0]).toContain('query=saved')
     expect(fetchImpl.mock.calls[0][0]).toContain('page=2')
+    expect(fetchImpl.mock.calls[0][0]).toContain('page_size=10')
     expect(result).toMatchObject({ page: 2, page_size: 10, total: 21, has_next: true })
     expect(result.items[0]).toMatchObject({ id: 'event-1', object_type: 'MODEL_VERSION' })
   })
@@ -143,6 +150,9 @@ describe('ApiClient contracts', () => {
     await expect(client.rollbackModel('model-1', { reason: '缺少目标' })).rejects.toMatchObject({
       code: 'ROLLBACK_TARGET_REQUIRED', status: 400,
     })
+    await expect(client.rollbackModel('model-1', { target_version_id: 'model-0', reason: ' ' })).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR', status: 400,
+    })
     expect(fetchImpl).toHaveBeenCalledTimes(2)
   })
 
@@ -158,5 +168,73 @@ describe('ApiClient contracts', () => {
 
   it('generates explicit idempotency keys when callers omit them', () => {
     expect(createIdempotencyKey('publish')).toMatch(/^publish:/)
+  })
+
+  it('infers alert pagination from the backend cursor and total when has_next is omitted', async () => {
+    const alert = { id: 'alert-1', model_type: 'electric_load', status: 'ACTIVE' }
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({
+      items: [alert], page: 1, page_size: 1, total: 2, next_cursor: 'cursor-2',
+      statistics: { total: 2, active: 2, acknowledged: 0, resolved: 0 },
+    }))
+
+    const result = await new ApiClient({ fetchImpl }).listAlerts({ page: 1, page_size: 1 })
+
+    expect(result.next_cursor).toBe('cursor-2')
+    expect(result.has_next).toBe(true)
+  })
+
+  it('uses formal workflow and lifecycle paths with canonical request bodies', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ id: 'task-1' }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'split-1' }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'job-1' }))
+      .mockResolvedValueOnce(jsonResponse(model))
+      .mockResolvedValueOnce(jsonResponse({ operation: 'offline', model }))
+      .mockResolvedValueOnce(jsonResponse({ operation: 'abnormal', model, alert: null }))
+    const client = new ApiClient({ fetchImpl })
+
+    await client.createPreprocessingTask({ model_type: 'electric_load', dataset_id: 'dataset-1', mode: 'skip', skip: true })
+    await client.splitDataset('dataset-1', 'task-1')
+    await client.createTrainingJob({
+      model_type: 'electric_load', dataset_id: 'dataset-1', preprocess_script_id: null,
+      preprocessing_task_id: 'task-1', train_script_id: 'trainer-1',
+    })
+    await client.saveModel('model-1', { model_type: 'electric_load', status: 'READY' })
+    await client.offlineModel('model-1')
+    await client.markModelAbnormal('model-1', '健康检查失败')
+
+    expect(fetchImpl.mock.calls.map((call) => call[0])).toEqual([
+      '/api/preprocessing-tasks',
+      '/api/datasets/dataset-1/split',
+      '/api/training-jobs',
+      '/api/models/model-1/save',
+      '/api/models/model-1/offline',
+      '/api/models/model-1/abnormal',
+    ])
+    expect(requestBody(fetchImpl.mock.calls[0])).toMatchObject({
+      model_type: 'electric_load', dataset_id: 'dataset-1', mode: 'skip', skip: true,
+    })
+    expect(requestBody(fetchImpl.mock.calls[1])).toEqual({ preprocessing_task_id: 'task-1' })
+    expect(requestBody(fetchImpl.mock.calls[5])).toEqual({ reason: '健康检查失败' })
+  })
+
+  it('falls back to the legacy health alias only after the formal endpoint returns 404', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ detail: 'not found' }, 404))
+      .mockResolvedValueOnce(jsonResponse({ status: 'ok' }))
+
+    await expect(new ApiClient({ fetchImpl }).getHealth()).resolves.toEqual({ status: 'ok' })
+    expect(fetchImpl.mock.calls.map((call) => call[0])).toEqual(['/health', '/api/health'])
+  })
+
+  it('does not treat non-formal MCP aliases as declared capabilities', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ paths: {
+      '/mcp/predict': { post: {} },
+      '/mcp/mark_model_abnormal': { post: {} },
+    } }))
+
+    await expect(new ApiClient({ fetchImpl }).getMcpCapabilities()).resolves.toEqual({
+      available: false, predict: false, markModelAbnormal: false,
+    })
   })
 })

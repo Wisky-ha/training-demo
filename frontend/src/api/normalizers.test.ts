@@ -137,4 +137,43 @@ describe('API normalizers', () => {
     })
     expect(normalizeAlert({ id: 'alert-2', model_type: 'electric_load', status: 'acknowledged', model_version_id: 'model-1' }).status).toBe('ACKNOWLEDGED')
   })
+
+  it('maps legacy upload aliases and nested missing-value summaries without inventing state', () => {
+    const result = normalizeDatasetUpload({
+      id: 'dataset-legacy',
+      fileName: 'legacy.csv',
+      fileSize: 0,
+      columnNames: ['feature'],
+      missingValues: { feature: { missing_count: 2, missing_ratio: 0.5 } },
+      validation_result: { valid: null, errors: [], warnings: [], checks: {} },
+      state: 'future-state',
+    })
+
+    expect(result).toMatchObject({
+      id: 'dataset-legacy',
+      fileName: 'legacy.csv',
+      fileSize: 0,
+      status: UNKNOWN,
+      validationStatus: UNKNOWN,
+    })
+    expect(result.columns).toEqual([expect.objectContaining({
+      name: 'feature', missingCount: 2, missingRatio: 0.5,
+    })])
+  })
+
+  it('keeps null input and empty evaluation arrays as explicit empty states', () => {
+    const dataset = normalizeDatasetUpload(null)
+    expect(dataset).toMatchObject({
+      id: null,
+      fileName: NOT_PROVIDED_TEXT,
+      status: UNKNOWN,
+      validationStatus: UNKNOWN,
+      columns: [],
+    })
+
+    const evaluation = normalizeEvaluation({ metrics: null, chart_data: [], error_data: [] })
+    expect(evaluation.chartData).toEqual([])
+    expect(evaluation.errorData).toEqual([])
+    expect(evaluation.candidate.metrics).toMatchObject({ mae: null, rmse: null, mape: null, r2: null })
+  })
 })

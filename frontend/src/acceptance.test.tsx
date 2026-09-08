@@ -341,6 +341,47 @@ describe('workflow acceptance flows', () => {
     })))
   })
 
+  it('does not let an upload response from the old model type repopulate the new chain', async () => {
+    let resolveUpload!: (value: DatasetUploadResult) => void
+    const pendingUpload = new Promise<DatasetUploadResult>((resolve) => { resolveUpload = resolve })
+    seedWorkflow({ modelType: 'electric_load' })
+    vi.spyOn(apiClient, 'uploadDataset').mockReturnValue(pendingUpload)
+    renderApp('/workflow/upload')
+
+    fireEvent.change(screen.getByLabelText(/拖拽 CSV 文件到这里/), {
+      target: { files: [new File(['time,value'], 'load.csv', { type: 'text/csv' })] },
+    })
+    await waitFor(() => expect(apiClient.uploadDataset).toHaveBeenCalled())
+
+    act(() => useAppStore.getState().setModelType('heating_cooling_load'))
+    resolveUpload(datasetFixture({ file_name: '旧模型.csv' }))
+    await waitFor(() => expect(useAppStore.getState().workflow.modelType).toBe('heating_cooling_load'))
+
+    expect(useAppStore.getState().workflow.datasetId).toBeNull()
+    expect(useAppStore.getState().workflow.dataset).toBeNull()
+  })
+
+  it('does not enable publish for a READY candidate whose health is unknown', async () => {
+    const succeededJob = trainingFixture()
+    const unknownHealth = baseModel({ status: 'DRAFT', health_status: null })
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(), preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(),
+      splitId: 'split-1', split: splitFixture(), trainScriptId: 'trainer-1', trainingJobId: 'job-1', trainingJob: succeededJob,
+      modelVersionId: 'model-1', modelVersion: unknownHealth, evaluation: evaluationFixture(),
+    })
+    mockWorkflowReads({ job: succeededJob, model: unknownHealth })
+    vi.spyOn(apiClient, 'listModels').mockResolvedValue([])
+    vi.spyOn(apiClient, 'saveModel').mockResolvedValue({ ...unknownHealth, status: 'READY' })
+    const publish = vi.spyOn(apiClient, 'publishModel')
+
+    renderApp('/workflow/publish')
+    fireEvent.click(await screen.findByRole('button', { name: '保存候选版本' }))
+    await waitFor(() => expect(apiClient.saveModel).toHaveBeenCalled())
+
+    expect((screen.getByRole('button', { name: '发布' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(publish).not.toHaveBeenCalled()
+  })
+
   it('persists workflow resource IDs and currentStep instead of treating objects as durable state', () => {
     seedWorkflow({
       modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
@@ -604,6 +645,15 @@ describe('model registry and MCP acceptance content', () => {
     expect(screen.queryByText('/api/mcp/mark_model_abnormal')).toBeNull()
     expect(screen.queryByText('MISSING_FEATURE')).toBeNull()
     expect(screen.queryByText('MCP 服务地址')).toBeNull()
+  })
+
+  it('keeps MCP strictly unavailable when the OpenAPI probe fails', async () => {
+    vi.spyOn(apiClient, 'getMcpCapabilities').mockRejectedValue(new ApiError('OpenAPI 不可用', { status: 503 }))
+    render(<McpPage />)
+
+    expect(await screen.findByText('NOT AVAILABLE')).toBeTruthy()
+    expect(screen.getByText('暂未接入')).toBeTruthy()
+    expect(screen.queryByText('POST /api/mcp/predict')).toBeNull()
   })
 
   it('shows only the declared MCP contracts after both OpenAPI routes are confirmed', async () => {

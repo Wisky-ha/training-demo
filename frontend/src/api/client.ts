@@ -366,15 +366,22 @@ export type CompatibleArrayResponse<T> = T[] & {
 function compatibleArrayResponse<T>(rows: T[], payload: unknown): CompatibleArrayResponse<T> {
   const result = rows as CompatibleArrayResponse<T>
   if (isRecord(payload) && Array.isArray(payload.items)) {
+    const page = typeof payload.page === 'number' ? payload.page : null
+    const pageSize = typeof payload.page_size === 'number' ? payload.page_size : null
+    const total = typeof payload.total === 'number' ? payload.total : rows.length
+    const nextCursor = typeof payload.next_cursor === 'string' ? payload.next_cursor : null
+    const hasNext = typeof payload.has_next === 'boolean'
+      ? payload.has_next
+      : Boolean(nextCursor) || (page !== null && pageSize !== null && page * pageSize < total)
     // Non-enumerable properties keep old ``array.map`` consumers and their
     // equality expectations intact while exposing page metadata to newer UI.
     Object.defineProperties(result, {
       items: { value: result, enumerable: false },
-      page: { value: typeof payload.page === 'number' ? payload.page : null, enumerable: false },
-      page_size: { value: typeof payload.page_size === 'number' ? payload.page_size : null, enumerable: false },
-      total: { value: typeof payload.total === 'number' ? payload.total : rows.length, enumerable: false },
-      has_next: { value: payload.has_next === true, enumerable: false },
-      next_cursor: { value: typeof payload.next_cursor === 'string' ? payload.next_cursor : null, enumerable: false },
+      page: { value: page, enumerable: false },
+      page_size: { value: pageSize, enumerable: false },
+      total: { value: total, enumerable: false },
+      has_next: { value: hasNext, enumerable: false },
+      next_cursor: { value: nextCursor, enumerable: false },
       statistics: { value: normalizeAlertStatistics(payload.statistics) ?? undefined, enumerable: false },
     })
   }

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { apiClient, type CompatibleArrayResponse } from '../api'
+import { apiClient, ApiError, type CompatibleArrayResponse } from '../api'
 import type { AuditEvent, ModelAlert, ModelVersionSummary, TrainingJob } from '../types/contracts'
 import { HomePage } from './HomePage'
 
@@ -194,5 +194,21 @@ describe('HomePage', () => {
     expect(await screen.findByText('暂无模型版本')).toBeTruthy()
     expect(screen.getByText('暂无活动告警')).toBeTruthy()
     expect(screen.getByText('暂无审计事件')).toBeTruthy()
+  })
+
+  it('keeps model, alert, and audit errors separate from their loading and empty states', async () => {
+    vi.spyOn(apiClient, 'listModels').mockRejectedValue(new ApiError('模型服务不可用', { status: 503 }))
+    vi.spyOn(apiClient, 'listAlerts').mockRejectedValue(new ApiError('告警服务不可用', { status: 503 }))
+    vi.spyOn(apiClient, 'listAuditEvents').mockRejectedValue(new ApiError('审计服务不可用', { status: 503 }))
+
+    renderHome()
+
+    await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(3))
+    expect(screen.getByText('模型服务不可用')).toBeTruthy()
+    expect(screen.getByText('告警服务不可用')).toBeTruthy()
+    expect(screen.getByText('审计服务不可用')).toBeTruthy()
+    expect(screen.queryByText('暂无模型版本')).toBeNull()
+    expect(screen.queryByText('暂无活动告警')).toBeNull()
+    expect(screen.queryByText('暂无审计事件')).toBeNull()
   })
 })

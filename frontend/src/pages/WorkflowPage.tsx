@@ -214,6 +214,9 @@ function UploadStep({
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const alive = useRef(true)
+
+  useEffect(() => () => { alive.current = false }, [])
 
   const upload = async (file?: File) => {
     if (!file) return
@@ -224,11 +227,15 @@ function UploadStep({
     setUploading(true)
     setError(null)
     try {
-      setDataset(await apiClient.uploadDataset(file, { model_type: modelType ?? undefined }))
+      const result = await apiClient.uploadDataset(file, { model_type: modelType ?? undefined })
+      // The upload may finish after a model switch. Do not let a response from
+      // the unmounted/old workflow repopulate the newly selected chain.
+      if (!alive.current || useAppStore.getState().workflow.modelType !== modelType) return
+      setDataset(result)
     } catch (reason) {
-      setError(errorMessage(reason))
+      if (alive.current) setError(errorMessage(reason))
     } finally {
-      setUploading(false)
+      if (alive.current) setUploading(false)
     }
   }
 
@@ -909,7 +916,9 @@ function PublishStep({ back, restoring }: { back: () => void; restoring: boolean
   const saved = savedLocally || lifecycleStatus === 'READY' || lifecycleStatus === 'PUBLISHED'
   const published = publishedLocally || lifecycleStatus === 'PUBLISHED'
   const candidate = workflow.modelVersion
-  const candidateHealth = upperStatus(candidate?.health_status) === 'HEALTHY' ? 'HEALTHY' : upperStatus(candidate?.health_status) === 'ABNORMAL' ? 'ABNORMAL' : 'UNKNOWN'
+  const candidateHealth = upperStatus(candidate?.health_status) === 'HEALTHY' && candidate?.is_abnormal !== true
+    ? 'HEALTHY'
+    : upperStatus(candidate?.health_status) === 'ABNORMAL' || candidate?.is_abnormal === true ? 'ABNORMAL' : 'UNKNOWN'
 
   useEffect(() => {
     if (!workflow.modelType) return
@@ -966,6 +975,10 @@ function PublishStep({ back, restoring }: { back: () => void; restoring: boolean
       setError('发布原因不能为空')
       return
     }
+    if (candidateHealth !== 'HEALTHY') {
+      setError('发布需要 READY 且 HEALTHY 候选版本')
+      return
+    }
     setPublishing(true)
     setError(null)
     try {
@@ -1020,7 +1033,7 @@ function PublishStep({ back, restoring }: { back: () => void; restoring: boolean
           </div>
           <div className="publish-actions">
             <Button disabled={restoring || saving || saved} kind="secondary" onClick={save}>{saving ? '保存中…' : saved ? 'READY' : '保存候选版本'}</Button>
-            <Button disabled={restoring || !saved || publishing || published} onClick={openPublish}>{publishing ? '发布中…' : published ? 'PUBLISHED' : '发布'}</Button>
+            <Button disabled={restoring || !saved || candidateHealth !== 'HEALTHY' || publishing || published} onClick={openPublish}>{publishing ? '发布中…' : published ? 'PUBLISHED' : '发布'}</Button>
           </div>
         </div>
       ) : !restoring ? <div className="empty-state">暂无候选模型版本</div> : null}

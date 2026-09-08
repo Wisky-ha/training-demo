@@ -232,6 +232,7 @@ export interface NormalizedDatasetUpload {
 
 const COLUMN_ROLES: readonly string[] = ['time', 'feature', 'target']
 const COLUMN_TYPES: readonly string[] = ['datetime', 'number', 'string', 'boolean', 'unknown']
+const DATASET_STATUSES: readonly string[] = ['UPLOADED', 'PARSED', 'FAILED']
 
 function normalizeColumnRole(value: unknown): NormalizedColumnRole {
   const candidate = lower(value)
@@ -266,17 +267,17 @@ function columnNames(source: WireRecord): string[] {
 function normalizeColumns(source: WireRecord, names: string[], missingCounts: WireRecord, types: WireRecord): NormalizedDatasetColumn[] {
   const rawColumns = Array.isArray(source.columns) ? source.columns : []
   const roleMap = firstRecord(source, ['field_roles', 'fieldRoles']) ?? {}
+  const missingValues = firstRecord(source, ['missing_values', 'missingValues']) ?? {}
   return names.map((name, index) => {
     const raw = asRecord(rawColumns[index]) ?? (rawColumns.find((item) => stringValue(asRecord(item)?.name) === name) as WireRecord | undefined) ?? {}
-    const missing = recordValue(source.missing_values)?.[name]
-    const missingRecord = asRecord(missing)
+    const missingRecord = asRecord(missingValues[name])
     const role = normalizeColumnRole(firstValue(raw, ['role', 'field_role']) ?? roleMap[name])
     const dataType = normalizeColumnType(firstValue(raw, ['data_type', 'dataType']) ?? types[name])
     const missingCount = firstNumber(raw, ['missing_count', 'missingCount'])
       ?? numberValue(missingCounts[name])
-      ?? numberValue(missingRecord?.missing_count)
+      ?? firstNumber(missingRecord ?? {}, ['missing_count', 'missingCount'])
     const missingRatio = firstNumber(raw, ['missing_ratio', 'missingRatio'])
-      ?? numberValue(missingRecord?.missing_ratio)
+      ?? firstNumber(missingRecord ?? {}, ['missing_ratio', 'missingRatio'])
     return {
       name,
       role,
@@ -304,6 +305,7 @@ export function normalizeDatasetUpload(value: unknown): NormalizedDatasetUpload 
     ? { start: stringValue(firstValue(range, ['start', 'min'])), end: stringValue(firstValue(range, ['end', 'max'])) }
     : null
   const statusText = upper(firstValue(source, ['status', 'state']))
+  const status = statusText && DATASET_STATUSES.includes(statusText) ? statusText : UNKNOWN
   const previewValue = firstValue(source, ['preview_rows', 'previewRows', 'preview'])
   const previewRows = Array.isArray(previewValue) ? previewValue.map((row: unknown) => asRecord(row) ?? {}) : []
   return {
@@ -326,7 +328,7 @@ export function normalizeDatasetUpload(value: unknown): NormalizedDatasetUpload 
     timeRange,
     validation,
     validationStatus: validationStatus(validation, statusText),
-    status: statusText ?? UNKNOWN,
+    status,
     createdAt: firstString(source, ['created_at', 'createdAt']),
   }
 }
