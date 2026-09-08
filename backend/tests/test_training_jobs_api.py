@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from backend.app.core.config import Settings
-from backend.app.db.models import ModelTypeORM, ModelVersionORM
+from backend.app.db.models import AuditEventORM, ModelTypeORM, ModelVersionORM
 from backend.app.db.session import create_session_factory, initialize_database
 from backend.app.domain.enums import HealthStatus, ModelType, ModelVersionStatus
 from backend.app.main import create_app
@@ -221,6 +221,12 @@ def test_cancel_stops_after_current_operation_and_does_not_create_version(traini
     assert job["finished_at"]
     with factory() as session:
         assert session.scalar(select(ModelVersionORM).where(ModelVersionORM.training_job_id == job_id)) is None
+        cancellation_events = list(session.scalars(select(AuditEventORM).where(
+            AuditEventORM.event_type == "TRAINING_CANCELLED",
+            AuditEventORM.training_job_id == job_id,
+            AuditEventORM.result == "SUCCEEDED",
+        )))
+        assert len(cancellation_events) == 1
 
 
 def test_success_can_use_existing_preprocessing_component(training_api):

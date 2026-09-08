@@ -565,19 +565,39 @@ class ModelLifecycleService:
         # This marker is intentionally independent: a later validation or
         # commit failure must not erase the fact that rollback was requested.
         # End the read transaction first; this is also safe for SQLite's
-        # StaticPool used by the in-memory test application.
+        # StaticPool used by the in-memory test application.  The process lock
+        # also makes the idempotency lookup and marker one serialized command,
+        # so a replay does not append a second STARTED event.
         self.session.rollback()
-        from .audit_events import record_audit_event
-        record_audit_event(
-            self.session, event_type="MODEL_ROLLBACK_STARTED", object_type="MODEL_VERSION",
-            object_id=requested.id, model_type=requested.model_type,
-            model_version_id=requested.id, message="已开始模型回滚",
-            metadata={"target_version_id": target_version_id, "target_version": target_version, "reason": reason},
-            context=audit_context, independent=True,
-        )
         with self._lock_for(requested.model_type):
+            if idempotency_key:
+                prior = self.session.scalar(select(RollbackRecordORM).where(
+                    RollbackRecordORM.idempotency_key == idempotency_key
+                ))
+                if prior is not None:
+                    if prior.model_type != requested.model_type or prior.rollback_from != requested.id:
+                        raise ModelLifecycleError("幂等键已用于其他模型回滚", "IDEMPOTENCY_KEY_CONFLICT")
+                    target = self.get(prior.rollback_to) if prior.rollback_to else None
+                    if target is None:
+                        raise ModelLifecycleError("幂等回滚记录缺少目标版本", "ROLLBACK_TARGET_NOT_FOUND")
+                    return prior, target
+
+            # The lookup above starts a read transaction. Close it before the
+            # independent write so SQLite cannot retain a reader while the
+            # operation-start marker is committed on its separate session.
+            self.session.rollback()
+            record_audit_event(
+                self.session, event_type="MODEL_ROLLBACK_STARTED", object_type="MODEL_VERSION",
+                object_id=requested.id, model_type=requested.model_type,
+                model_version_id=requested.id, message="已开始模型回滚",
+                metadata={"target_version_id": target_version_id, "target_version": target_version, "reason": reason},
+                context=audit_context, independent=True,
+            )
             record = self._lock_type(requested.model_type)
             if idempotency_key:
+                # Re-check after the independent marker for a writer outside
+                # this process that won the key between the first lookup and
+                # the serialized state transition.
                 prior = self.session.scalar(select(RollbackRecordORM).where(
                     RollbackRecordORM.idempotency_key == idempotency_key
                 ))

@@ -94,12 +94,15 @@ def _operation(operation: str, service: ModelLifecycleService, version: ModelVer
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=ModelVersionResponse, include_in_schema=False)
 def save_model(body: ModelSaveRequest, request: Request, session: Session = Depends(get_session)):
     service = _service(request, session)
+    version_for_audit = service.get(body.id) if body.id else None
     try:
         return service.to_model_response(service.save(body, audit_context=context_from_request(request)))
     except ModelLifecycleError as exc:
         record_failure_audit_event(
             session, event_type="MODEL_SAVED", object_type="MODEL_VERSION",
-            object_id=body.id, model_type=body.model_type,
+            object_id=body.id,
+            model_type=version_for_audit.model_type if version_for_audit is not None else body.model_type,
+            model_version_id=version_for_audit.id if version_for_audit is not None else None,
             message=str(exc), metadata={"error_code": exc.code}, context=context_from_request(request),
         )
         raise _error(exc) from exc
@@ -139,6 +142,7 @@ def save_existing_model(model_id: str, body: ModelSaveRequest, request: Request,
         exc = ModelNotFoundError()
         record_failure_audit_event(
             session, event_type="MODEL_SAVED", object_type="MODEL_VERSION", object_id=model_id,
+            model_type=body.model_type,
             message=str(exc), metadata={"error_code": exc.code}, context=context_from_request(request),
         )
         raise _error(exc)
@@ -146,21 +150,24 @@ def save_existing_model(model_id: str, body: ModelSaveRequest, request: Request,
         exc = ModelLifecycleError("模型类型不匹配", "MODEL_TYPE_INVALID")
         record_failure_audit_event(
             session, event_type="MODEL_SAVED", object_type="MODEL_VERSION", object_id=model_id,
-            model_type=existing.model_type, message=str(exc), metadata={"error_code": exc.code}, context=context_from_request(request),
+            model_type=existing.model_type, model_version_id=existing.id,
+            message=str(exc), metadata={"error_code": exc.code}, context=context_from_request(request),
         )
         raise _error(exc)
     if existing.is_baseline:
         exc = ModelLifecycleError("系统基线不能修改", "MODEL_BASELINE_IMMUTABLE")
         record_failure_audit_event(
             session, event_type="MODEL_SAVED", object_type="MODEL_VERSION", object_id=model_id,
-            model_type=existing.model_type, message=str(exc), metadata={"error_code": exc.code}, context=context_from_request(request),
+            model_type=existing.model_type, model_version_id=existing.id,
+            message=str(exc), metadata={"error_code": exc.code}, context=context_from_request(request),
         )
         raise _error(exc)
     if existing.status not in {ModelVersionStatus.DRAFT, ModelVersionStatus.READY}:
         exc = ModelLifecycleError("当前状态不能再次保存", "MODEL_SAVE_STATE_INVALID")
         record_failure_audit_event(
             session, event_type="MODEL_SAVED", object_type="MODEL_VERSION", object_id=model_id,
-            model_type=existing.model_type, message=str(exc), metadata={"error_code": exc.code}, context=context_from_request(request),
+            model_type=existing.model_type, model_version_id=existing.id,
+            message=str(exc), metadata={"error_code": exc.code}, context=context_from_request(request),
         )
         raise _error(exc)
     try:
@@ -198,7 +205,8 @@ def save_existing_model(model_id: str, body: ModelSaveRequest, request: Request,
         session.rollback()
         record_failure_audit_event(
             session, event_type="MODEL_SAVED", object_type="MODEL_VERSION",
-            object_id=model_id, message=str(exc), metadata={"error_code": exc.code},
+            object_id=model_id, model_type=existing.model_type, model_version_id=existing.id,
+            message=str(exc), metadata={"error_code": exc.code},
             context=context_from_request(request),
         )
         raise _error(exc) from exc
@@ -209,6 +217,7 @@ def publish_model(model_id: str, request: Request, body: PublishRequest | None =
                   session: Session = Depends(get_session)):
     service = _service(request, session)
     body = body or PublishRequest()
+    version_for_audit = service.get(model_id)
     try:
         version, record = service.publish(
             model_id, confirmed=body.confirmed, reason=body.reason,
@@ -219,7 +228,15 @@ def publish_model(model_id: str, request: Request, body: PublishRequest | None =
     except ModelLifecycleError as exc:
         record_failure_audit_event(
             session, event_type="MODEL_PUBLISHED", object_type="MODEL_VERSION",
-            object_id=model_id, message=str(exc), metadata={"error_code": exc.code},
+            object_id=model_id,
+            model_type=version_for_audit.model_type if version_for_audit is not None else None,
+            model_version_id=version_for_audit.id if version_for_audit is not None else None,
+            message=str(exc),
+            metadata={
+                "error_code": exc.code,
+                "reason": body.reason,
+                "idempotency_key": body.idempotency_key,
+            },
             context=context_from_request(request),
         )
         raise _error(exc) from exc
@@ -227,12 +244,16 @@ def publish_model(model_id: str, request: Request, body: PublishRequest | None =
 
 def _retire(model_id: str, request: Request, session: Session):
     service = _service(request, session)
+    version_for_audit = service.get(model_id)
     try:
         return _operation("offline", service, service.retire(model_id, context_from_request(request)))
     except ModelLifecycleError as exc:
         record_failure_audit_event(
             session, event_type="MODEL_OFFLINED", object_type="MODEL_VERSION",
-            object_id=model_id, message=str(exc), metadata={"error_code": exc.code},
+            object_id=model_id,
+            model_type=version_for_audit.model_type if version_for_audit is not None else None,
+            model_version_id=version_for_audit.id if version_for_audit is not None else None,
+            message=str(exc), metadata={"error_code": exc.code},
             context=context_from_request(request),
         )
         raise _error(exc) from exc
@@ -264,6 +285,7 @@ def rollback_model(model_id: str, request: Request, body: RollbackRequest | None
                    session: Session = Depends(get_session)):
     service = _service(request, session)
     body = body or RollbackRequest()
+    version_for_audit = service.get(model_id)
     try:
         if not body.target_version_id:
             raise ModelLifecycleError(
@@ -278,7 +300,16 @@ def rollback_model(model_id: str, request: Request, body: RollbackRequest | None
     except ModelLifecycleError as exc:
         record_failure_audit_event(
             session, event_type="MODEL_ROLLBACK_FAILED", object_type="MODEL_VERSION",
-            object_id=model_id, message=str(exc), metadata={"error_code": exc.code},
+            object_id=model_id,
+            model_type=version_for_audit.model_type if version_for_audit is not None else None,
+            model_version_id=version_for_audit.id if version_for_audit is not None else None,
+            message=str(exc),
+            metadata={
+                "error_code": exc.code,
+                "target_version_id": body.target_version_id,
+                "reason": body.reason,
+                "idempotency_key": body.idempotency_key,
+            },
             context=context_from_request(request),
         )
         raise _error(exc) from exc
@@ -289,14 +320,15 @@ def abnormal_model_by_type(body: ModelAbnormalRequest, request: Request,
                            session: Session = Depends(get_session)):
     """Mark a type-scoped version abnormal and fail over atomically."""
     service = _service(request, session)
+    version_for_audit = None
     try:
-        version = service._resolve_model_version(body.model_type, body.model_version)
+        version_for_audit = service._resolve_model_version(body.model_type, body.model_version)
         alert, rollback, target = service.mark_model_abnormal(
             body.model_type, body.model_version,
             reason=body.reason, abnormal=body.abnormal,
             audit_context=context_from_request(request),
         )
-        response_version = target or version
+        response_version = target or version_for_audit
         return _operation("abnormal", service, response_version, rollback=rollback, alert=alert)
     except ModelLifecycleError as exc:
         # NoHealthyRollbackError is raised after the abnormal state and the
@@ -305,7 +337,9 @@ def abnormal_model_by_type(body: ModelAbnormalRequest, request: Request,
         if not isinstance(exc, NoHealthyRollbackError):
             record_failure_audit_event(
                 session, event_type="MODEL_MARKED_ABNORMAL", object_type="MODEL_VERSION",
-                object_id=body.model_version, model_type=body.model_type,
+                object_id=version_for_audit.id if version_for_audit is not None else body.model_version,
+                model_type=version_for_audit.model_type if version_for_audit is not None else body.model_type,
+                model_version_id=version_for_audit.id if version_for_audit is not None else None,
                 message=str(exc), metadata={"error_code": exc.code}, context=context_from_request(request),
             )
         raise _error(exc) from exc
@@ -317,6 +351,7 @@ def abnormal_model(model_id: str, request: Request, body: AbnormalRequest | None
     """Compatibility form retained for clients that already have a version id."""
     service = _service(request, session)
     body = body or AbnormalRequest()
+    version_for_audit = service.get(model_id)
     try:
         alert, rollback, target = service.mark_abnormal(
             model_id, body.reason, abnormal=body.abnormal,
@@ -334,7 +369,10 @@ def abnormal_model(model_id: str, request: Request, body: AbnormalRequest | None
         if not isinstance(exc, NoHealthyRollbackError):
             record_failure_audit_event(
                 session, event_type="MODEL_MARKED_ABNORMAL", object_type="MODEL_VERSION",
-                object_id=model_id, message=str(exc), metadata={"error_code": exc.code},
+                object_id=model_id,
+                model_type=version_for_audit.model_type if version_for_audit is not None else None,
+                model_version_id=version_for_audit.id if version_for_audit is not None else None,
+                message=str(exc), metadata={"error_code": exc.code},
                 context=context_from_request(request),
             )
         raise _error(exc) from exc
@@ -439,6 +477,7 @@ def get_alert(alert_id: str, request: Request, session: Session = Depends(get_se
 def acknowledge_alert(alert_id: str, request: Request, body: AlertAcknowledgeRequest | None = None,
                       session: Session = Depends(get_session)):
     service = _service(request, session)
+    alert_for_audit = session.get(ModelAlertORM, alert_id)
     try:
         if body is not None and not body.confirmed:
             raise ModelLifecycleError("确认告警必须 confirmed=true", "ALERT_CONFIRMATION_REQUIRED")
@@ -451,7 +490,10 @@ def acknowledge_alert(alert_id: str, request: Request, body: AlertAcknowledgeReq
     except ModelLifecycleError as exc:
         record_failure_audit_event(
             session, event_type="ALERT_ACKNOWLEDGED", object_type="ALERT",
-            object_id=alert_id, message=str(exc), metadata={"error_code": exc.code},
+            object_id=alert_id,
+            model_type=alert_for_audit.model_type if alert_for_audit is not None else None,
+            model_version_id=alert_for_audit.model_version_id if alert_for_audit is not None else None,
+            message=str(exc), metadata={"error_code": exc.code},
             context=context_from_request(request),
         )
         raise _error(exc) from exc

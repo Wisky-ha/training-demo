@@ -115,6 +115,7 @@ def get_training_job_logs(
 @router.post("/{job_id}/retry", response_model=TrainingJobResponse)
 def retry_training_job(job_id: str, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     service = _service(request, session)
+    job_for_audit = service.get(job_id)
     try:
         job = service.retry(job_id, audit_context=context_from_request(request))
         executor = getattr(request.app.state, "training_job_executor", None)
@@ -127,7 +128,9 @@ def retry_training_job(job_id: str, request: Request, session: Session = Depends
     except TrainingJobError as exc:
         record_failure_audit_event(
             session, event_type="TRAINING_FAILED", object_type="TRAINING_JOB",
-            object_id=job_id, training_job_id=job_id, message=str(exc),
+            object_id=job_id,
+            model_type=job_for_audit.model_type if job_for_audit is not None else None,
+            training_job_id=job_id, message=str(exc),
             metadata={"error_code": exc.code},
             context=context_from_request(request),
         )
@@ -135,7 +138,9 @@ def retry_training_job(job_id: str, request: Request, session: Session = Depends
     except Exception:
         record_failure_audit_event(
             session, event_type="TRAINING_FAILED", object_type="TRAINING_JOB",
-            object_id=job_id, training_job_id=job_id, message="训练任务重试提交失败",
+            object_id=job_id,
+            model_type=job_for_audit.model_type if job_for_audit is not None else None,
+            training_job_id=job_id, message="训练任务重试提交失败",
             metadata={"error_code": "TRAINING_RETRY_SUBMIT_FAILED"}, context=context_from_request(request),
         )
         raise
@@ -156,12 +161,16 @@ def get_training_evaluation(job_id: str, request: Request, session: Session = De
 
 @router.post("/{job_id}/cancel", response_model=TrainingJobResponse)
 def cancel_training_job(job_id: str, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+    service = _service(request, session)
+    job_for_audit = service.get(job_id)
     try:
-        job = _service(request, session).cancel(job_id, context_from_request(request))
+        job = service.cancel(job_id, context_from_request(request))
     except TrainingJobError as exc:
         record_failure_audit_event(
             session, event_type="TRAINING_CANCELLED", object_type="TRAINING_JOB",
-            object_id=job_id, training_job_id=job_id, message=str(exc),
+            object_id=job_id,
+            model_type=job_for_audit.model_type if job_for_audit is not None else None,
+            training_job_id=job_id, message=str(exc),
             metadata={"error_code": exc.code},
             context=context_from_request(request),
         )
