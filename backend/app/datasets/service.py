@@ -16,7 +16,7 @@ from pandas.errors import EmptyDataError, ParserError
 from sqlalchemy.orm import Session
 
 from ..core.config import Settings, get_settings
-from ..db.repositories import DatasetRepository
+from ..db.repositories import DatasetRepository, FileArtifactRepository
 from ..domain.models import DatasetRecord
 from ..storage import FileStorageService, StoredArtifact
 from ..services.audit_events import AuditContext, record_audit_event, record_failure_audit_event
@@ -832,6 +832,84 @@ class DatasetService:
             }
         )
         return result
+
+    def get(self, dataset_id: str) -> dict[str, Any] | None:
+        """Return persisted inspection metadata for workflow rehydration.
+
+        The upload response is intentionally not persisted in browser storage.
+        This read reconstructs the same public shape from the durable dataset
+        row and artifact metadata without rereading the CSV.
+        """
+        if self.session is None:
+            raise RuntimeError("读取数据集需要提供数据库 session")
+        record = DatasetRepository(self.session).get(dataset_id)
+        if record is None:
+            return None
+
+        roles = {
+            record.time_column: "time",
+            record.target_column: "target",
+            **{column: "feature" for column in record.feature_columns},
+        }
+        missing_values = {
+            column: {
+                "missing_count": count,
+                "missing_ratio": count / record.row_count if record.row_count else 0.0,
+            }
+            for column, count in record.missing_value_counts.items()
+        }
+        columns = [
+            {
+                "name": column,
+                "role": roles.get(column, "feature"),
+                "data_type": record.column_types.get(column, "unknown"),
+                "nullable": record.missing_value_counts.get(column, 0) > 0,
+                "missing_count": record.missing_value_counts.get(column, 0),
+                "missing_ratio": missing_values.get(column, {}).get("missing_ratio", 0.0),
+            }
+            for column in record.columns
+        ]
+        artifact = FileArtifactRepository(self.session).get_for_artifact("dataset", dataset_id)
+        file_storage = None
+        if artifact is not None:
+            file_storage = {
+                "artifact_type": artifact.artifact_type,
+                "relative_path": artifact.relative_path,
+                "size_bytes": artifact.size_bytes,
+                "checksum_sha256": artifact.checksum_sha256,
+            }
+        status_value = record.status.value if hasattr(record.status, "value") else str(record.status)
+        return {
+            "id": record.id,
+            "dataset_id": record.id,
+            "file_name": record.file_name,
+            "file_path": record.file_path,
+            "file_size_bytes": artifact.size_bytes if artifact is not None else 0,
+            "checksum_sha256": artifact.checksum_sha256 if artifact is not None else "",
+            "file_storage": file_storage,
+            "row_count": record.row_count,
+            "column_count": len(record.columns),
+            "columns": columns,
+            "column_names": record.columns,
+            "field_roles": roles,
+            "time_column": record.time_column,
+            "feature_columns": record.feature_columns,
+            "target_column": record.target_column,
+            "column_types": record.column_types,
+            "missing_value_counts": record.missing_value_counts,
+            "missing_values": missing_values,
+            "preview_rows": record.preview_rows,
+            "preview": record.preview_rows,
+            "numeric_columns": record.numeric_columns,
+            "time_parse": record.time_parse,
+            "time_range": record.time_range,
+            # A row can only be persisted after parsing/validation succeeds.
+            "validation": {"valid": status_value == "parsed", "errors": [], "warnings": [], "checks": {}},
+            "summary": record.summary,
+            "data_summary": record.summary,
+            "status": status_value,
+            "created_at": record.created_at.isoformat(),
+        }
 
     # Explicit aliases help callers distinguish parsing-only from persistence.
     parse = parse_csv

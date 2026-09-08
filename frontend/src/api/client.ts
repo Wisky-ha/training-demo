@@ -464,6 +464,11 @@ export class ApiClient {
     return this.postForm<DatasetUploadResult>('datasets/upload', formData)
   }
 
+  /** Read persisted dataset metadata; upload responses are not durable UI state. */
+  getDataset(id: EntityId): Promise<DatasetUploadResult> {
+    return this.get<DatasetUploadResult>(`datasets/${encodeURIComponent(id)}`)
+  }
+
   createPreprocessingTask(input: {
     model_type: ModelTypeCode
     dataset_id: EntityId

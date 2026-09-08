@@ -33,6 +33,8 @@ export interface WorkflowDraft {
   trainScriptId: EntityId | null
   trainingJobId: EntityId | null
   trainingJob: TrainingJob | null
+  /** Persisted resource reference; the object below is only a replaceable cache. */
+  modelVersionId: EntityId | null
   evaluation: ModelEvaluation | null
   modelVersion: ModelVersionSummary | null
   currentStep: WorkflowStepId

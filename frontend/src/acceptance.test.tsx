@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import App from './App'
-import { apiClient } from './api'
+import { ApiClient, ApiError, apiClient } from './api'
 import { McpPage } from './pages/McpPage'
 import { ModelVersionsPage } from './pages/ModelVersionsPage'
 import { useAppStore } from './store/useAppStore'
-import type { ModelVersionSummary } from './types/contracts'
+import type { DatasetSplitResult, DatasetUploadResult, ModelEvaluation, ModelVersionSummary, PreprocessTask, ScriptContract, TrainingJob } from './types/contracts'
 
 const baseModel = (overrides: Partial<ModelVersionSummary> = {}): ModelVersionSummary => ({
   id: 'model-1',
@@ -22,7 +22,7 @@ const baseModel = (overrides: Partial<ModelVersionSummary> = {}): ModelVersionSu
   preprocess_used: false,
   model_path: 'models/v1.joblib',
   preprocessor_path: null,
-  training_job_id: null,
+  training_job_id: 'job-1',
   train_script_id: 'trainer-1',
   train_script_version: '1.0.0',
   preprocess_script_id: null,
@@ -38,6 +38,84 @@ const baseModel = (overrides: Partial<ModelVersionSummary> = {}): ModelVersionSu
   ...overrides,
 })
 
+const datasetFixture = (overrides: Partial<DatasetUploadResult> = {}): DatasetUploadResult => ({
+  id: 'dataset-1', dataset_id: 'dataset-1', file_name: 'load.csv', file_path: 'datasets/load.csv',
+  file_size_bytes: 10, checksum_sha256: 'checksum', file_storage: null, row_count: 5, column_count: 3,
+  columns: [
+    { name: 'time', role: 'time', data_type: 'datetime', nullable: false, missing_count: 0, missing_ratio: 0 },
+    { name: 'feature', role: 'feature', data_type: 'number', nullable: false, missing_count: 0, missing_ratio: 0 },
+    { name: 'target', role: 'target', data_type: 'number', nullable: false, missing_count: 0, missing_ratio: 0 },
+  ],
+  column_names: ['time', 'feature', 'target'], field_roles: { time: 'time', feature: 'feature', target: 'target' },
+  time_column: 'time', feature_columns: ['feature'], target_column: 'target',
+  column_types: { time: 'datetime', feature: 'number', target: 'number' }, missing_value_counts: { time: 0, feature: 0, target: 0 },
+  missing_values: {}, preview_rows: [], preview: [], numeric_columns: ['feature', 'target'],
+  time_parse: { success: true, format: null, invalid_count: 0, min: '2026-01-01T00:00:00Z', max: '2026-01-05T00:00:00Z', message: null },
+  time_range: { start: '2026-01-01T00:00:00Z', end: '2026-01-05T00:00:00Z' },
+  validation: { valid: true, errors: [], warnings: [], checks: {} }, summary: {}, data_summary: {}, status: 'parsed',
+  created_at: '2026-01-01T00:00:00Z', ...overrides,
+})
+
+const preprocessFixture = (overrides: Partial<PreprocessTask> = {}): PreprocessTask => ({
+  id: 'task-1', model_type: 'electric_load', dataset_id: 'dataset-1', preprocess_script_id: null,
+  preprocess_used: false, preprocess_status: 'unused', preprocess_message: '未使用预处理，后续使用原始特征',
+  status: 'SKIPPED', stage: 'completed', progress_stage: 'completed', logs: ['未使用预处理，后续使用原始特征'],
+  error_message: null, input_row_count: 5, output_row_count: 5, input_columns: ['time', 'feature', 'target'],
+  output_columns: ['time', 'feature', 'target'], input_summary: {}, output_summary: {}, preprocessor_path: null,
+  preprocessor_state: null, started_at: null, finished_at: '2026-01-01T00:00:01Z', created_at: '2026-01-01T00:00:00Z',
+  next_step: 'dataset_split', data_source: 'raw', ...overrides,
+})
+
+const splitFixture = (overrides: Partial<DatasetSplitResult> = {}): DatasetSplitResult => ({
+  id: 'split-1', dataset_id: 'dataset-1', preprocessing_task_id: 'task-1', data_source: 'raw',
+  split_strategy: 'time_ordered', split_ratio: 0.8, test_ratio: 0.2, total_row_count: 5,
+  train_row_count: 4, test_row_count: 1, train_time_range: { start: '2026-01-01T00:00:00Z', end: '2026-01-04T00:00:00Z' },
+  test_time_range: { start: '2026-01-05T00:00:00Z', end: '2026-01-05T00:00:00Z' },
+  train_time_start: '2026-01-01T00:00:00Z', train_time_end: '2026-01-04T00:00:00Z',
+  test_time_start: '2026-01-05T00:00:00Z', test_time_end: '2026-01-05T00:00:00Z', created_at: '2026-01-01T00:00:00Z', ...overrides,
+})
+
+const trainingFixture = (overrides: Partial<TrainingJob> = {}): TrainingJob => ({
+  id: 'job-1', model_type: 'electric_load', dataset_id: 'dataset-1', preprocess_script_id: null,
+  preprocessing_task_id: 'task-1', train_script_id: 'trainer-1', split_strategy: 'time_ordered', split_ratio: 0.8,
+  test_ratio: 0.2, status: 'SUCCEEDED', progress_stage: 'SUCCEEDED', current_stage: '进入评估', logs: [],
+  error_message: null, model_version_id: 'model-1', train_row_count: 4, test_row_count: 1,
+  train_time_start: '2026-01-01T00:00:00Z', train_time_end: '2026-01-04T00:00:00Z',
+  test_time_start: '2026-01-05T00:00:00Z', test_time_end: '2026-01-05T00:00:00Z',
+  created_at: '2026-01-01T00:00:00Z', started_at: '2026-01-01T00:00:01Z', finished_at: '2026-01-01T00:01:00Z', ...overrides,
+})
+
+const trainerFixture: ScriptContract = {
+  id: 'trainer-1', name: '训练脚本', script_type: 'trainer', version: '1.0.0', source_code: 'return 0',
+  supported_model_types: ['electric_load'], status: 'ENABLED', created_at: '2026-01-01T00:00:00Z', uploaded_at: '2026-01-01T00:00:00Z',
+}
+
+const evaluationFixture = (overrides: Partial<ModelEvaluation> = {}): ModelEvaluation => ({
+  job_id: 'job-1', model_version_id: 'model-1',
+  metrics: { mae: 1, rmse: 2, mape: 3, r2: 0.8, sample_count: 1, mape_valid_count: 1, mape_excluded_count: 0, mape_note: '' },
+  chart_data: [], error_data: [], model_comparison: {
+    candidate: { model_version_id: 'model-1', version: 'v1', metrics: { mae: 1, rmse: 2, mape: 3, r2: 0.8, sample_count: 1, mape_valid_count: 1, mape_excluded_count: 0, mape_note: '' } },
+    baseline: { model_version_id: null, version: null, metrics: { mae: null, rmse: null, mape: null, r2: null, sample_count: 0, mape_valid_count: 0, mape_excluded_count: 0, mape_note: '' } },
+    changes: { mae: null, rmse: null, mape: null, r2: null },
+  }, chart_sampled: false, chart_total_count: 0, chart_sample_count: 0,
+  test_time_series: [], timestamps: [], actual_values: [], candidate_predictions: [], baseline_predictions: [],
+  candidate_errors: [], baseline_errors: [], error_series: [], ...overrides,
+})
+
+function mockWorkflowReads({ job = trainingFixture(), model = baseModel(), evaluation = evaluationFixture() }: {
+  job?: TrainingJob
+  model?: ModelVersionSummary
+  evaluation?: ModelEvaluation
+} = {}) {
+  vi.spyOn(apiClient, 'getDataset').mockResolvedValue(datasetFixture())
+  vi.spyOn(apiClient, 'getPreprocessingTask').mockResolvedValue(preprocessFixture())
+  vi.spyOn(apiClient, 'getDatasetSplit').mockResolvedValue(splitFixture())
+  vi.spyOn(apiClient, 'getTrainingJob').mockResolvedValue(job)
+  vi.spyOn(apiClient, 'getModel').mockResolvedValue({ ...model, input_schema: {}, evaluation: null })
+  const evaluationRead = vi.spyOn(apiClient, 'getTrainingJobEvaluation').mockResolvedValue(evaluation)
+  return { evaluationRead }
+}
+
 function renderApp(path: string) {
   return render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>)
 }
@@ -52,6 +130,27 @@ afterEach(() => {
   vi.restoreAllMocks()
   useAppStore.getState().resetWorkflow()
   window.localStorage.clear()
+})
+
+describe('API client browser integration', () => {
+  it('keeps the browser fetch receiver when using the default adapter', async () => {
+    const originalFetch = globalThis.fetch
+    const fetchMock = vi.fn(function (this: unknown) {
+      expect(this).toBe(globalThis)
+      return Promise.resolve({
+        status: 200,
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ status: 'ok' }),
+      } as Response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      await expect(new ApiClient().getHealth()).resolves.toEqual({ status: 'ok' })
+    } finally {
+      vi.stubGlobal('fetch', originalFetch)
+    }
+  })
 })
 
 describe('workflow acceptance flows', () => {
@@ -78,32 +177,28 @@ describe('workflow acceptance flows', () => {
     seedWorkflow({
       modelType: 'electric_load',
       datasetId: 'dataset-1',
+      dataset: datasetFixture(),
       preprocessTaskId: 'task-1',
-      preprocessTask: {
-        id: 'task-1', dataset_id: 'dataset-1', preprocess_script_id: null,
-        preprocess_used: false, preprocess_status: 'unused', status: 'skipped',
-        stage: 'completed', logs: ['未使用预处理，后续使用原始特征'],
-        created_at: '2026-01-01T00:00:00Z', data_source: 'raw',
-      },
+      preprocessTask: preprocessFixture(),
     })
     vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [], pagination: { page: 1, page_size: 20, total: 0, total_pages: 0 } })
+    mockWorkflowReads({ job: trainingFixture({ model_version_id: null }) })
     renderApp('/workflow/preprocess')
 
     expect(await screen.findByText('未使用预处理，后续使用原始特征')).toBeTruthy()
-    expect(screen.getByText('预处理已跳过')).toBeTruthy()
+    expect(screen.getByText(/预处理.*已跳过/)).toBeTruthy()
   })
 
   it('shows failed-training retry guidance and submits a retry', async () => {
+    const failedJob = trainingFixture({ status: 'FAILED', model_version_id: null, progress_stage: 'FAILED', current_stage: '失败', logs: ['FAILED：训练脚本失败'], error_message: '训练脚本失败' })
     seedWorkflow({
-      modelType: 'electric_load', datasetId: 'dataset-1', preprocessTaskId: 'task-1',
-      split: { id: 'split-1', dataset_id: 'dataset-1', preprocessing_task_id: 'task-1', data_source: 'raw', split_strategy: 'time_ordered', split_ratio: 0.8, test_ratio: 0.2, total_row_count: 5, train_row_count: 4, test_row_count: 1, train_time_range: { start: '2024-01-01', end: '2024-01-04' }, test_time_range: { start: '2024-01-05', end: '2024-01-05' }, train_time_start: '2024-01-01', train_time_end: '2024-01-04', test_time_start: '2024-01-05', test_time_end: '2024-01-05', created_at: '2026-01-01T00:00:00Z' },
-      trainScriptId: 'trainer-1', trainingJobId: 'job-1',
-      trainingJob: { id: 'job-1', model_type: 'electric_load', dataset_id: 'dataset-1', preprocess_script_id: null, train_script_id: 'trainer-1', status: 'FAILED', progress_stage: 'FAILED', current_stage: '失败', logs: ['FAILED：训练脚本失败'], error_message: '训练脚本失败', created_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z' },
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(), splitId: 'split-1', split: splitFixture(),
+      trainScriptId: 'trainer-1', trainingJobId: 'job-1', trainingJob: failedJob, modelVersionId: null,
     })
     vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [], pagination: { page: 1, page_size: 20, total: 0, total_pages: 0 } })
-    const retry = vi.spyOn(apiClient, 'retryTrainingJob').mockResolvedValue({
-      ...useAppStore.getState().workflow.trainingJob!, status: 'PENDING', error_message: null,
-    })
+    mockWorkflowReads({ job: failedJob })
+    const retry = vi.spyOn(apiClient, 'retryTrainingJob').mockResolvedValue({ ...failedJob, status: 'PENDING', error_message: null })
     renderApp('/workflow/train')
 
     expect(await screen.findByText('本次训练失败，不会影响生产模型。修复脚本或配置后可以重试。')).toBeTruthy()
@@ -111,21 +206,271 @@ describe('workflow acceptance flows', () => {
     await waitFor(() => expect(retry).toHaveBeenCalledWith('job-1'))
   })
 
-  it('requires browser confirmation before publishing a candidate', async () => {
+  it('enables the evaluation transition after training succeeds with a model version ID', async () => {
+    const succeededJob = trainingFixture()
     seedWorkflow({
-      modelType: 'electric_load', datasetId: 'dataset-1', preprocessTaskId: 'task-1',
-      split: { id: 'split-1', dataset_id: 'dataset-1', preprocessing_task_id: 'task-1', data_source: 'raw', split_strategy: 'time_ordered', split_ratio: 0.8, test_ratio: 0.2, total_row_count: 5, train_row_count: 4, test_row_count: 1, train_time_range: { start: '2024-01-01', end: '2024-01-04' }, test_time_range: { start: '2024-01-05', end: '2024-01-05' }, train_time_start: '2024-01-01', train_time_end: '2024-01-04', test_time_start: '2024-01-05', test_time_end: '2024-01-05', created_at: '2026-01-01T00:00:00Z' },
-      trainingJobId: 'job-1', trainingJob: { id: 'job-1', model_type: 'electric_load', dataset_id: 'dataset-1', preprocess_script_id: null, train_script_id: 'trainer-1', status: 'SUCCEEDED', logs: [], error_message: null, created_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z' },
-      modelVersion: baseModel(),
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(), splitId: 'split-1', split: splitFixture(),
+      trainScriptId: 'trainer-1', trainingJobId: 'job-1', trainingJob: succeededJob, modelVersionId: 'model-1',
     })
+    vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [], pagination: { page: 1, page_size: 20, total: 0, total_pages: 0 } })
+    mockWorkflowReads({ job: succeededJob })
+    renderApp('/workflow/train')
+
+    const next = await screen.findByRole('button', { name: /查看评估结果/ }) as HTMLButtonElement
+    expect(next.disabled).toBe(false)
+    fireEvent.click(next)
+    expect(await screen.findByRole('heading', { name: '评估结果与模型对比' })).toBeTruthy()
+  })
+
+  it('blocks evaluation when a succeeded training job has no model_version_id', async () => {
+    const succeededJob = trainingFixture({ model_version_id: null })
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(), splitId: 'split-1', split: splitFixture(),
+      trainScriptId: 'trainer-1', trainingJobId: 'job-1', trainingJob: succeededJob, modelVersionId: null,
+    })
+    vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [], pagination: { page: 1, page_size: 20, total: 0, total_pages: 0 } })
+    const { evaluationRead } = mockWorkflowReads({ job: succeededJob })
+    renderApp('/workflow/evaluate')
+
+    expect(await screen.findByRole('heading', { name: '选择训练脚本并启动' })).toBeTruthy()
+    expect(screen.getAllByText(/缺少 model_version_id/).length).toBeGreaterThan(0)
+    expect((screen.getByRole('button', { name: /查看评估结果/ }) as HTMLButtonElement).disabled).toBe(true)
+    expect(evaluationRead).not.toHaveBeenCalled()
+  })
+
+  it('requires browser confirmation before publishing a candidate', async () => {
+    const succeededJob = trainingFixture()
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(), splitId: 'split-1', split: splitFixture(),
+      trainScriptId: 'trainer-1', trainingJobId: 'job-1', trainingJob: succeededJob,
+      modelVersionId: 'model-1', modelVersion: baseModel(), evaluation: evaluationFixture(),
+    })
+    mockWorkflowReads({ job: succeededJob })
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
     const publish = vi.spyOn(apiClient, 'publishModel')
     renderApp('/workflow/publish')
 
-    fireEvent.click(screen.getByRole('button', { name: '发布模型' }))
+    fireEvent.click(await screen.findByRole('button', { name: '发布模型' }))
 
     expect(confirm).toHaveBeenCalledWith('发布后将成为当前生产模型，是否确认发布？')
     expect(publish).not.toHaveBeenCalled()
+  })
+
+  it('persists workflow resource IDs and currentStep instead of treating objects as durable state', () => {
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessScriptId: 'preprocess-1', preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(),
+      splitId: 'split-1', split: splitFixture(), trainScriptId: 'trainer-1', trainingJobId: 'job-1',
+      trainingJob: trainingFixture(), modelVersionId: 'model-1', modelVersion: baseModel(),
+      currentStep: 'evaluate',
+    })
+    const persisted = JSON.parse(window.localStorage.getItem('model-training-platform-ui') ?? '{}') as { state?: { workflow?: Record<string, unknown> } }
+    expect(persisted.state?.workflow).toEqual({
+      modelType: 'electric_load', datasetId: 'dataset-1', preprocessScriptId: 'preprocess-1',
+      preprocessTaskId: 'task-1', splitId: 'split-1', trainScriptId: 'trainer-1', trainingJobId: 'job-1',
+      modelVersionId: 'model-1', currentStep: 'evaluate',
+    })
+  })
+
+  it('does not treat legacy persisted resource objects as hydrated state', async () => {
+    window.localStorage.setItem('model-training-platform-ui', JSON.stringify({
+      state: {
+        theme: 'light',
+        sidebarCollapsed: false,
+        workflow: {
+          modelType: 'electric_load',
+          datasetId: 'dataset-1',
+          dataset: datasetFixture({ file_name: '过期缓存.csv' }),
+          currentStep: 'upload',
+        },
+      },
+      version: 0,
+    }))
+
+    await act(async () => { await useAppStore.persist.rehydrate() })
+    expect(useAppStore.getState().workflow.datasetId).toBe('dataset-1')
+    expect(useAppStore.getState().workflow.dataset).toBeNull()
+  })
+
+  it('clears every downstream ID and cache when the model type changes', () => {
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', preprocessScriptId: 'preprocess-1',
+      preprocessTaskId: 'task-1', splitId: 'split-1', trainScriptId: 'trainer-1', trainingJobId: 'job-1',
+      modelVersionId: 'model-1', dataset: datasetFixture(), preprocessTask: preprocessFixture(), split: splitFixture(),
+      trainingJob: trainingFixture(), modelVersion: baseModel(), evaluation: evaluationFixture(), currentStep: 'publish',
+    })
+    useAppStore.getState().setModelType('heating_cooling_load')
+    expect(useAppStore.getState().workflow).toMatchObject({
+      modelType: 'heating_cooling_load', datasetId: null, preprocessScriptId: null, preprocessTaskId: null,
+      splitId: null, trainScriptId: null, trainingJobId: null, modelVersionId: null, currentStep: 'upload',
+      dataset: null, preprocessTask: null, split: null, trainingJob: null, evaluation: null, modelVersion: null,
+    })
+  })
+
+  it('applies a valid model_type query as a model switch and drops the old chain', async () => {
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', preprocessTaskId: 'task-1', splitId: 'split-1',
+      trainingJobId: 'job-1', modelVersionId: 'model-1', dataset: datasetFixture(), preprocessTask: preprocessFixture(),
+      split: splitFixture(), trainingJob: trainingFixture(), modelVersion: baseModel(), evaluation: evaluationFixture(),
+    })
+    renderApp('/workflow/upload?model_type=heating_cooling_load')
+    expect(await screen.findByRole('heading', { name: '上传并检查 CSV 数据' })).toBeTruthy()
+    expect(useAppStore.getState().workflow).toMatchObject({
+      modelType: 'heating_cooling_load', datasetId: null, preprocessTaskId: null, splitId: null,
+      trainingJobId: null, modelVersionId: null, evaluation: null,
+    })
+  })
+
+  it('refreshes each cached resource by ID and restores the latest server objects', async () => {
+    const oldJob = trainingFixture({ status: 'RUNNING', model_version_id: null, current_stage: '旧状态', finished_at: null })
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', preprocessTaskId: 'task-1', splitId: 'split-1',
+      trainScriptId: 'trainer-1', trainingJobId: 'job-1', modelVersionId: 'model-1', currentStep: 'evaluate',
+      dataset: datasetFixture({ file_name: '旧缓存.csv' }), preprocessTask: preprocessFixture({ logs: ['旧缓存'] }),
+      split: splitFixture({ train_row_count: 3 }), trainingJob: oldJob, modelVersion: baseModel({ version: 'old' }),
+      evaluation: null,
+    })
+    useAppStore.getState().setWorkflowContext({
+      dataset: null, preprocessTask: null, split: null, trainingJob: null, modelVersion: null, evaluation: null,
+      datasetId: 'dataset-1', preprocessTaskId: 'task-1', splitId: 'split-1', trainingJobId: 'job-1', modelVersionId: 'model-1',
+    })
+    const latestDataset = datasetFixture({ file_name: '最新.csv' })
+    const latestTask = preprocessFixture({ logs: ['最新任务'] })
+    const latestSplit = splitFixture({ train_row_count: 4 })
+    const latestJob = trainingFixture({ current_stage: '最新状态' })
+    const latestModel = baseModel({ version: 'latest' })
+    const latestEvaluation = evaluationFixture()
+    const reads = {
+      dataset: vi.spyOn(apiClient, 'getDataset').mockResolvedValue(latestDataset),
+      task: vi.spyOn(apiClient, 'getPreprocessingTask').mockResolvedValue(latestTask),
+      split: vi.spyOn(apiClient, 'getDatasetSplit').mockResolvedValue(latestSplit),
+      job: vi.spyOn(apiClient, 'getTrainingJob').mockResolvedValue(latestJob),
+      model: vi.spyOn(apiClient, 'getModel').mockResolvedValue({ ...latestModel, input_schema: {}, evaluation: null }),
+      evaluation: vi.spyOn(apiClient, 'getTrainingJobEvaluation').mockResolvedValue(latestEvaluation),
+    }
+    vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [], pagination: { page: 1, page_size: 20, total: 0, total_pages: 0 } })
+    renderApp('/workflow/evaluate')
+
+    await waitFor(() => expect(reads.evaluation).toHaveBeenCalledWith('job-1'))
+    expect(reads.dataset).toHaveBeenCalledWith('dataset-1')
+    expect(reads.task).toHaveBeenCalledWith('task-1')
+    expect(reads.split).toHaveBeenCalledWith('dataset-1')
+    expect(reads.job).toHaveBeenCalledWith('job-1')
+    expect(reads.model).toHaveBeenCalledWith('model-1')
+    expect(useAppStore.getState().workflow).toMatchObject({
+      dataset: latestDataset, preprocessTask: latestTask, split: latestSplit, trainingJob: latestJob,
+      modelVersion: latestModel, evaluation: latestEvaluation,
+    })
+  })
+
+  it('resumes polling for an unfinished training job after refresh', async () => {
+    const runningJob = trainingFixture({ status: 'RUNNING', model_version_id: null, current_stage: '训练中', finished_at: null })
+    const succeededJob = trainingFixture({ status: 'SUCCEEDED', model_version_id: 'model-1' })
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(), preprocessTaskId: 'task-1',
+      preprocessTask: preprocessFixture(), splitId: 'split-1', split: splitFixture(), trainScriptId: 'trainer-1',
+      trainingJobId: 'job-1', trainingJob: runningJob, modelVersionId: null, currentStep: 'train',
+    })
+    const jobRead = vi.spyOn(apiClient, 'getTrainingJob')
+      .mockResolvedValueOnce(runningJob)
+      .mockResolvedValueOnce(succeededJob)
+      .mockResolvedValue(succeededJob)
+    vi.spyOn(apiClient, 'getDataset').mockResolvedValue(datasetFixture())
+    vi.spyOn(apiClient, 'getPreprocessingTask').mockResolvedValue(preprocessFixture())
+    vi.spyOn(apiClient, 'getDatasetSplit').mockResolvedValue(splitFixture())
+    vi.spyOn(apiClient, 'getModel').mockResolvedValue({ ...baseModel(), input_schema: {}, evaluation: null })
+    vi.spyOn(apiClient, 'getTrainingJobEvaluation').mockResolvedValue(evaluationFixture())
+    vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [], pagination: { page: 1, page_size: 20, total: 0, total_pages: 0 } })
+    renderApp('/workflow/train')
+
+    await waitFor(() => expect(useAppStore.getState().workflow.trainingJob?.status).toBe('SUCCEEDED'))
+    expect(jobRead).toHaveBeenCalledWith('job-1')
+    expect(useAppStore.getState().workflow.modelVersionId).toBe('model-1')
+  })
+
+  it('keeps a skipped preprocessing task in the split and training request chain', async () => {
+    seedWorkflow({ modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture() })
+    vi.spyOn(apiClient, 'getDataset').mockResolvedValue(datasetFixture())
+    vi.spyOn(apiClient, 'getPreprocessingTask').mockResolvedValue(preprocessFixture())
+    vi.spyOn(apiClient, 'getTrainingJob').mockResolvedValue(trainingFixture({ status: 'RUNNING', model_version_id: null }))
+    vi.spyOn(apiClient, 'listScripts').mockImplementation(async (params) => params?.script_type === 'preprocessor'
+      ? { items: [], pagination: { page: 1, page_size: 20, total: 0, total_pages: 0 } }
+      : { items: [trainerFixture], pagination: { page: 1, page_size: 20, total: 1, total_pages: 1 } })
+    const createPreprocess = vi.spyOn(apiClient, 'createPreprocessingTask').mockResolvedValue(preprocessFixture())
+    const noSplit = new ApiError('尚未划分', { status: 404 })
+    const createdSplit = splitFixture()
+    vi.spyOn(apiClient, 'getDatasetSplit').mockImplementation(async () => {
+      if (useAppStore.getState().workflow.splitId) return createdSplit
+      throw noSplit
+    })
+    const createSplit = vi.spyOn(apiClient, 'splitDataset').mockResolvedValue(createdSplit)
+    const createTraining = vi.spyOn(apiClient, 'createTrainingJob').mockResolvedValue(trainingFixture({ status: 'RUNNING', model_version_id: null }))
+    renderApp('/workflow/preprocess')
+
+    fireEvent.click(await screen.findByRole('button', { name: /执行并继续/ }))
+    await waitFor(() => expect(createPreprocess).toHaveBeenCalledWith(expect.objectContaining({
+      preprocess_script_id: null, mode: 'skip', skip: true,
+    })))
+    fireEvent.click(await screen.findByRole('button', { name: /生成 80\/20 划分/ }))
+    await waitFor(() => expect(createSplit).toHaveBeenCalledWith('dataset-1', 'task-1'))
+    fireEvent.click(await screen.findByRole('button', { name: /继续选择训练脚本/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /训练脚本/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /启动训练/ }))
+    await waitFor(() => expect(createTraining).toHaveBeenCalledWith(expect.objectContaining({
+      preprocess_script_id: null, preprocessing_task_id: 'task-1',
+    })))
+  })
+
+  it('redirects to the first available step when a required ID is missing', async () => {
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessTask: preprocessFixture(), preprocessTaskId: 'task-1', currentStep: 'publish',
+    })
+    vi.spyOn(apiClient, 'getDataset').mockResolvedValue(datasetFixture())
+    vi.spyOn(apiClient, 'getPreprocessingTask').mockResolvedValue(preprocessFixture())
+    renderApp('/workflow/publish')
+
+    expect(await screen.findByRole('heading', { name: '数据集划分' })).toBeTruthy()
+    expect(screen.getAllByText(/缺少 splitId/).length).toBeGreaterThan(0)
+  })
+
+  it('cleans the complete chain when an ID query returns 404', async () => {
+    const job = trainingFixture()
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', preprocessTaskId: 'task-1', splitId: 'split-1',
+      trainingJobId: 'job-1', modelVersionId: 'model-1', dataset: datasetFixture(), preprocessTask: preprocessFixture(),
+      split: splitFixture(), trainingJob: job, modelVersion: baseModel(), evaluation: evaluationFixture(),
+    })
+    vi.spyOn(apiClient, 'getDataset').mockRejectedValue(new ApiError('不存在', { status: 404 }))
+    vi.spyOn(apiClient, 'getPreprocessingTask').mockResolvedValue(preprocessFixture())
+    vi.spyOn(apiClient, 'getDatasetSplit').mockResolvedValue(splitFixture())
+    vi.spyOn(apiClient, 'getTrainingJob').mockResolvedValue(job)
+    renderApp('/workflow/publish')
+
+    expect(await screen.findByRole('heading', { name: '上传并检查 CSV 数据' })).toBeTruthy()
+    expect(useAppStore.getState().workflow).toMatchObject({
+      datasetId: null, preprocessTaskId: null, splitId: null, trainingJobId: null, modelVersionId: null,
+      dataset: null, preprocessTask: null, split: null, trainingJob: null, modelVersion: null, evaluation: null,
+    })
+  })
+
+  it('ignores a stale hydration response after switching model type', async () => {
+    let resolveDataset!: (value: DatasetUploadResult) => void
+    const pendingDataset = new Promise<DatasetUploadResult>((resolve) => { resolveDataset = resolve })
+    seedWorkflow({ modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture() })
+    vi.spyOn(apiClient, 'getDataset').mockReturnValue(pendingDataset)
+    vi.spyOn(apiClient, 'getPreprocessingTask').mockResolvedValue(preprocessFixture())
+    renderApp('/workflow/upload')
+    await waitFor(() => expect(apiClient.getDataset).toHaveBeenCalledWith('dataset-1'))
+
+    act(() => useAppStore.getState().setModelType('heating_cooling_load'))
+    resolveDataset(datasetFixture({ file_name: '过期.csv' }))
+    await waitFor(() => expect(useAppStore.getState().workflow.modelType).toBe('heating_cooling_load'))
+    expect(useAppStore.getState().workflow.datasetId).toBeNull()
+    expect(useAppStore.getState().workflow.dataset).toBeNull()
   })
 })
 

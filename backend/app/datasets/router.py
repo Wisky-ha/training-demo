@@ -112,6 +112,23 @@ def _split_error(exc: DatasetSplitError) -> HTTPException:
     )
 
 
+@router.get("/{dataset_id}")
+def get_dataset(
+    dataset_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Return durable dataset metadata for workflow context hydration."""
+
+    dataset = DatasetService(session, settings=getattr(request.app.state, "settings", None)).get(dataset_id)
+    if dataset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "DATASET_NOT_FOUND", "message": f"数据集不存在：{dataset_id}"},
+        )
+    return dataset
+
+
 @router.post(
     "/{dataset_id}/split",
     status_code=status.HTTP_201_CREATED,

@@ -89,6 +89,30 @@ def test_valid_csv_returns_roles_types_missing_preview_summary_and_persists(data
         assert body["file_storage"]["checksum_sha256"] == artifact.checksum_sha256
 
 
+def test_dataset_can_be_read_by_id_for_workflow_hydration(dataset_api):
+    client, _, _ = dataset_api
+    response = upload(
+        client,
+        b"time,feature,target\n2024-01-01,1,10\n2024-01-02,2,20\n",
+    )
+    assert response.status_code == 201, response.text
+    dataset_id = response.json()["id"]
+
+    restored = client.get(f"/api/datasets/{dataset_id}")
+    assert restored.status_code == 200, restored.text
+    body = restored.json()
+    assert body["id"] == dataset_id
+    assert body["dataset_id"] == dataset_id
+    assert body["file_name"] == "load.csv"
+    assert body["column_names"] == ["time", "feature", "target"]
+    assert body["validation"]["valid"] is True
+    assert body["file_storage"]["checksum_sha256"] == response.json()["file_storage"]["checksum_sha256"]
+
+    missing = client.get("/api/datasets/not-found")
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "DATASET_NOT_FOUND"
+
+
 def test_upload_rejects_fewer_than_three_columns(dataset_api):
     response = upload(dataset_api[0], b"time,target\n2024-01-01,1\n")
     assert response.status_code == 400
