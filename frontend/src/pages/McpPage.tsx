@@ -1,73 +1,139 @@
-const modelDefaults = [
-  ['electric_load', '电力负荷预测'],
-  ['heating_cooling_load', '冷热负荷预测'],
-  ['integrated_energy', '综合能耗预测'],
-] as const
+import { useEffect, useState } from 'react'
+import { apiClient } from '../api/client'
+import { MODEL_TYPE_CODES } from '../types/contracts'
 
-const predictRequest = `{
-  "model_type": "electric_load",
-  "model_version": "v2",
-  "data": [{
-    "timestamp": "2026-01-01 10:00:00",
-    "temperature": 23.5,
-    "humidity": 60
-  }]
-}`
+type SchemaRow = readonly [string, string, string, string]
 
-const predictResponse = `{
-  "success": true,
-  "model_type": "electric_load",
-  "model_version": "v2",
-  "preprocess_used": true,
-  "predictions": [1250.36]
-}`
+type McpPageState = 'loading' | 'unavailable' | 'available'
 
-const abnormalRequest = `{
-  "model_type": "electric_load",
-  "model_version": "v2",
-  "abnormal": true,
-  "reason": "连续预测偏差过大"
-}`
+const modelTypes = MODEL_TYPE_CODES.join(' / ')
 
-const errorResponse = `{
-  "success": false,
-  "error_code": "MISSING_FEATURE",
-  "message": "缺少特征字段 humidity",
-  "details": {
-    "missing_fields": ["humidity"],
-    "required_fields": ["timestamp", "temperature", "humidity"]
-  }
-}`
+// These rows mirror backend/app/schemas/mcp.py. They describe the validated
+// request bodies, not an executable example or a client-side prediction form.
+const predictRequestSchema: SchemaRow[] = [
+  ['model_type', '必填', 'ModelType', `取值：${modelTypes}`],
+  ['model_version', '可选', 'string | null', '长度 1–100；未提供时由后端版本解析合同处理'],
+  ['data', '必填', 'list[object]', 'JSON 记录数组；输入字段按已保存的模型版本 schema 校验'],
+]
 
-const errorCodes = [
-  ['MODEL_TYPE_NOT_FOUND', '模型类型不存在'],
-  ['MODEL_VERSION_NOT_FOUND', '指定版本不存在'],
-  ['MODEL_VERSION_UNAVAILABLE', '版本异常、训练中、待发布或已下线，不能用于预测'],
-  ['MISSING_TIME_FIELD', '缺少时间字段'],
-  ['MISSING_FEATURE', '缺少必填特征字段'],
-  ['INVALID_FIELD_TYPE', '字段类型不正确'],
-  ['INVALID_TIME_FORMAT', '时间格式不正确'],
-  ['PREPROCESS_FAILED', '预处理执行失败'],
-  ['PREDICTION_FAILED', '模型预测失败'],
-] as const
+const predictResponseSchema: SchemaRow[] = [
+  ['success', '返回', 'true', '预测成功标志'],
+  ['model_type', '返回', 'ModelType', '实际使用的模型类型'],
+  ['model_version', '返回', 'string', '实际使用的模型版本'],
+  ['preprocess_used', '返回', 'boolean', '是否使用已保存的预处理状态'],
+  ['predictions', '返回', 'number[]', '按输入记录顺序返回的预测值'],
+]
 
-function CodeBlock({ children }: { children: string }) {
-  return <pre className="code-block"><code>{children}</code></pre>
+const abnormalRequestSchema: SchemaRow[] = [
+  ['model_type', '必填', 'ModelType', `取值：${modelTypes}`],
+  ['model_version', '必填', 'string', '长度 1–100；版本号或版本资源 ID'],
+  ['abnormal', '可选', 'boolean', '默认值：true'],
+  ['reason', '可选', 'string', '默认值：健康检查异常；长度 1–2000'],
+]
+
+const abnormalResponseSchema: SchemaRow[] = [
+  ['success', '返回', 'true', '异常标记处理成功标志'],
+  ['model_type', '返回', 'ModelType', '处理的模型类型'],
+  ['model_version', '返回', 'string', '处理的模型版本'],
+  ['abnormal', '返回', 'boolean', '本次请求的异常状态'],
+  ['current_model_version', '返回', 'string', '处理后当前模型版本'],
+  ['alert', '返回', 'object | null', '告警响应或 null'],
+  ['rollback', '返回', 'object | null', '回滚响应或 null'],
+  ['rollback_triggered', '返回', 'boolean', '是否触发回滚'],
+  ['alert_cleared', '返回', 'boolean', '是否清除告警'],
+]
+
+const errorEnvelopeSchema: SchemaRow[] = [
+  ['success', '返回', 'false', '失败标志'],
+  ['error_code', '返回', 'string', '稳定业务错误码'],
+  ['message', '返回', 'string', '面向调用方的错误消息'],
+  ['details', '返回', 'object', '结构化错误详情；无详情时为空对象'],
+]
+
+const errorStatusSchema: SchemaRow[] = [
+  ['400', '错误', 'INVALID_REQUEST / INVALID_INPUT_DATA / MISSING_TIME_FIELD / MISSING_FEATURE / INVALID_FIELD_TYPE / INVALID_TIME_FORMAT', '请求 JSON、字段或输入记录校验失败'],
+  ['404', '错误', 'MODEL_TYPE_NOT_FOUND / MODEL_VERSION_NOT_FOUND', '模型类型或版本解析失败'],
+  ['409', '错误', 'MODEL_VERSION_UNAVAILABLE / NO_HEALTHY_BACKUP / NO_HEALTHY_ROLLBACK_VERSION', '模型不可用或回滚条件冲突'],
+  ['500', '错误', 'MODEL_LOAD_FAILED / PREPROCESS_FAILED / PREDICTION_FAILED / INTERNAL_ERROR', '模型加载、预处理或预测失败'],
+]
+
+function SchemaTable({ rows }: { rows: ReadonlyArray<SchemaRow> }) {
+  return <div className="table-wrap parameter-table-wrap"><table><thead><tr><th>字段</th><th>约束</th><th>类型</th><th>说明</th></tr></thead><tbody>{rows.map(([name, constraint, type, description]) => <tr key={name}><td><code>{name}</code></td><td>{constraint}</td><td>{type}</td><td>{description}</td></tr>)}</tbody></table></div>
 }
 
-function ParameterTable({ rows }: { rows: Array<[string, string, string, string]> }) {
-  return <div className="table-wrap parameter-table-wrap"><table><thead><tr><th>参数</th><th>必填</th><th>类型</th><th>说明</th></tr></thead><tbody>{rows.map(([name, required, type, description]) => <tr key={name}><td><code>{name}</code></td><td>{required}</td><td>{type}</td><td>{description}</td></tr>)}</tbody></table></div>
+function McpFrame({ children }: { children: React.ReactNode }) {
+  return <div className="page-content mcp-page">
+    <div className="mcp-header"><div><p className="eyebrow">MCP</p><h1 className="page-title">MCP 服务</h1></div></div>
+    {children}
+  </div>
+}
+
+function UnavailableMcp() {
+  return <McpFrame>
+    <section className="mcp-panel" aria-label="MCP 接入状态">
+      <div className="mcp-panel-heading"><div><h2>接入状态</h2></div><span className="status-badge neutral">NOT AVAILABLE</span></div>
+      <strong>暂未接入</strong>
+    </section>
+  </McpFrame>
+}
+
+function LoadingMcp() {
+  return <McpFrame>
+    <section className="mcp-panel" aria-label="MCP 接入状态" aria-live="polite">
+      <div className="mcp-panel-heading"><div><h2>接入状态</h2></div><span className="status-badge neutral">CHECKING</span></div>
+      <strong>正在确认正式 OpenAPI 声明</strong>
+    </section>
+  </McpFrame>
+}
+
+function AvailableMcp() {
+  return <McpFrame>
+    <section className="mcp-panel">
+      <div className="mcp-panel-heading"><div><p className="eyebrow">POST /api/mcp/predict</p><h2><code>predict</code></h2><p>正式 MCP 预测路由的请求与响应 schema。</p></div><span className="status-badge success">已接入</span></div>
+      <div className="mcp-two-column">
+        <div><h3>请求 schema · PredictRequest</h3><SchemaTable rows={predictRequestSchema} /></div>
+        <div><h3>响应 schema · PredictionResponse</h3><SchemaTable rows={predictResponseSchema} /></div>
+      </div>
+    </section>
+
+    <section className="mcp-panel">
+      <div className="mcp-panel-heading"><div><p className="eyebrow">POST /api/mcp/mark_model_abnormal</p><h2><code>mark_model_abnormal</code></h2><p>正式 MCP 异常标记路由的请求与响应 schema。</p></div><span className="status-badge success">已接入</span></div>
+      <div className="mcp-two-column">
+        <div><h3>请求 schema · MCPModelAbnormalRequest</h3><SchemaTable rows={abnormalRequestSchema} /></div>
+        <div><h3>响应 schema · McpMarkModelAbnormalResponse</h3><SchemaTable rows={abnormalResponseSchema} /></div>
+      </div>
+    </section>
+
+    <section className="mcp-panel">
+      <div className="mcp-panel-heading"><div><p className="eyebrow">ERROR CONTRACT</p><h2>统一错误合同</h2><p>两个正式 MCP 路由均返回统一失败 envelope。</p></div></div>
+      <div className="mcp-two-column error-contract">
+        <div><h3>失败响应 schema · McpErrorResponse</h3><SchemaTable rows={errorEnvelopeSchema} /></div>
+        <div><h3>HTTP 状态与错误码</h3><SchemaTable rows={errorStatusSchema} /></div>
+      </div>
+    </section>
+  </McpFrame>
 }
 
 export function McpPage() {
-  return <div className="page-content mcp-page">
-    <div className="mcp-header"><div><p className="eyebrow">MCP SERVICE / API GUIDE</p><h1 className="page-title">MCP 服务说明</h1><p className="page-description">面向预测调用方的工具契约、默认版本规则和错误处理说明。以下示例以当前后端数据契约为准。</p></div><div className="service-address-card"><small>MCP 服务地址</small><code>未提供</code><span className="api-base-note">当前 API 基址：/api</span><span className="status-badge warning-badge">MCP 路由待接入</span></div></div>
-    <div className="alert-box warning mcp-notice" role="status"><b>当前后端能力边界</b><span>已实现模型生命周期接口（包括 <code>/api/models/{'{id}'}/abnormal</code>），但当前代码未提供独立的 MCP <code>predict</code> 或工具发现路由。页面中的 MCP 契约用于联调说明，不会伪造可用接口。</span></div>
-    <section className="mcp-panel"><div className="mcp-panel-heading"><div><p className="eyebrow">TOOL 01</p><h2><code>predict</code> · 模型预测</h2><p>提交 JSON 行记录，按指定版本或默认规则执行预测。</p></div><span className="status-badge neutral">待后端提供 MCP endpoint</span></div><ParameterTable rows={[["model_type", "是", "string", "模型类型：electric_load / heating_cooling_load / integrated_energy"], ["model_version", "否", "string", "模型版本；省略时自动选择当前有效、最新已发布且健康的版本"], ["data", "是", "object[]", "待预测的 JSON 行记录数组，字段必须符合模型输入规范"]]} /><div className="mcp-two-column"><div><h3>请求示例</h3><CodeBlock>{predictRequest}</CodeBlock></div><div><h3>成功返回示例</h3><CodeBlock>{predictResponse}</CodeBlock></div></div><div className="rule-callout"><strong>默认版本规则</strong><span>省略 <code>model_version</code> 时，系统自动选择该模型类型的<strong>当前有效 + 最新已发布 + 健康</strong>版本；指定了版本但不可用时不会静默切换。</span></div></section>
-    <section className="mcp-panel"><div className="mcp-panel-heading"><div><p className="eyebrow">TOOL 02</p><h2><code>mark_model_abnormal</code> · 标记模型异常</h2><p>当监控发现预测偏差或制品异常时，触发异常记录与可用的自动回滚。</p></div><span className="status-badge neutral">生命周期 API 已提供</span></div><ParameterTable rows={[["model_type", "是", "string", "MCP 工具契约中的模型类型"], ["model_version", "是", "string", "需要标记的版本号"], ["abnormal", "是", "boolean", "必须为 true；false 不能自动解除告警"], ["reason", "是", "string", "异常原因，不能为空"]]} /><div className="mcp-two-column"><div><h3>工具请求示例</h3><CodeBlock>{abnormalRequest}</CodeBlock></div><div className="implementation-note"><h3>当前后端调用方式</h3><p>后端实际提供的是按版本 ID 调用的生命周期接口：</p><CodeBlock>{`POST /api/models/{id}/abnormal
+  const [state, setState] = useState<McpPageState>('loading')
 
-{ "reason": "连续预测偏差过大" }`}</CodeBlock><p>需要调用方先通过 <code>GET /api/models</code> 将模型类型与版本号解析为版本 ID。独立 MCP 适配层尚未实现。</p></div></div></section>
-    <section className="mcp-panel"><div className="mcp-panel-heading"><div><p className="eyebrow">DEFAULT RESOLUTION</p><h2>三类模型的默认版本</h2><p>三类模型统一采用同一套安全解析规则，不因模型类型不同而降级。</p></div></div><div className="default-model-grid">{modelDefaults.map(([code, name]) => <article key={code}><span className="model-symbol">{code === 'electric_load' ? '⚡' : code === 'heating_cooling_load' ? '◒' : '⌁'}</span><h3>{name}</h3><code>{code}</code><p>省略 <code>model_version</code> 时 → 当前有效、最新已发布、健康版本。</p></article>)}</div></section>
-    <section className="mcp-panel"><div className="mcp-panel-heading"><div><p className="eyebrow">ERROR CONTRACT</p><h2>错误码与处理</h2><p>目标 MCP 错误返回统一使用 <code>success: false</code>；指定版本不可用时必须直接报错。</p></div></div><div className="mcp-two-column error-contract"><div><h3>错误返回示例</h3><CodeBlock>{errorResponse}</CodeBlock></div><div className="error-code-list">{errorCodes.map(([code, description]) => <div key={code}><code>{code}</code><span>{description}</span></div>)}</div></div><div className="implementation-note compact-note"><b>当前实现提示：</b>生命周期接口的错误由 FastAPI 以 HTTP 400/409 和 <code>detail.code</code> 返回；预测及 MCP 统一错误 envelope 需后端补充后才能正式调用。</div></section>
-  </div>
+  useEffect(() => {
+    let active = true
+    apiClient.getMcpCapabilities()
+      .then((capabilities) => {
+        if (active) setState(capabilities.available ? 'available' : 'unavailable')
+      })
+      .catch(() => {
+        // An unreadable OpenAPI document cannot confirm either route, so keep
+        // the prototype's strict empty boundary rather than guessing.
+        if (active) setState('unavailable')
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  if (state === 'loading') return <LoadingMcp />
+  if (state === 'unavailable') return <UnavailableMcp />
+  return <AvailableMcp />
 }

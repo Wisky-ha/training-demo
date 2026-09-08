@@ -19,6 +19,7 @@ import type {
   ListModelsParams,
   ListScriptsParams,
   ModelAlert,
+  McpCapabilities,
   ModelEvaluation,
   ModelTypeCode,
   ModelVersionDetail,
@@ -114,6 +115,27 @@ function asJsonValue(value: unknown): JsonValue | null {
   if (Array.isArray(value)) return value as JsonValue[]
   if (isRecord(value)) return value as JsonValue
   return null
+}
+
+const MCP_OPENAPI_PATHS = {
+  predict: '/api/mcp/predict',
+  markModelAbnormal: '/api/mcp/mark_model_abnormal',
+} as const
+
+function hasDeclaredPost(pathItem: unknown): boolean {
+  return isRecord(pathItem) && isRecord(pathItem.post)
+}
+
+/** Only a formal POST declaration for both documented paths makes MCP available. */
+export function inspectMcpOpenApi(document: unknown): McpCapabilities {
+  const paths = isRecord(document) && isRecord(document.paths) ? document.paths : null
+  const predict = Boolean(paths && hasDeclaredPost(paths[MCP_OPENAPI_PATHS.predict]))
+  const markModelAbnormal = Boolean(paths && hasDeclaredPost(paths[MCP_OPENAPI_PATHS.markModelAbnormal]))
+  return {
+    available: predict && markModelAbnormal,
+    predict,
+    markModelAbnormal,
+  }
 }
 
 function toErrorResponse(payload: unknown, status: number): ApiError {
@@ -722,6 +744,10 @@ export class ApiClient {
         has_next: hasNext,
       }
     })
+  }
+
+  getMcpCapabilities(): Promise<McpCapabilities> {
+    return this.get<unknown>('../openapi.json').then(inspectMcpOpenApi)
   }
 
   predict(input: PredictionRequest): Promise<PredictionResponse> {

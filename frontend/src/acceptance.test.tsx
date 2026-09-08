@@ -590,13 +590,38 @@ describe('model registry and MCP acceptance content', () => {
     expect(screen.getByText('回滚基线')).toBeTruthy()
   })
 
-  it('documents MCP default-version and error handling rules without claiming an endpoint', () => {
+  it('keeps the prototype empty boundary when OpenAPI does not declare both MCP routes', async () => {
+    vi.spyOn(apiClient, 'getMcpCapabilities').mockResolvedValue({
+      available: false,
+      predict: true,
+      markModelAbnormal: false,
+    })
     render(<McpPage />)
 
-    expect(screen.getByText(/当前有效 \+ 最新已发布 \+ 健康/)).toBeTruthy()
-    expect(screen.getByText(/指定了版本但不可用时不会静默切换/)).toBeTruthy()
-    expect(screen.getByText('MCP 路由待接入')).toBeTruthy()
-    expect(screen.getByText('MISSING_FEATURE')).toBeTruthy()
-    expect(screen.getByText(/独立 MCP 适配层尚未实现/)).toBeTruthy()
+    expect(await screen.findByText('NOT AVAILABLE')).toBeTruthy()
+    expect(screen.getByText('暂未接入')).toBeTruthy()
+    expect(screen.queryByText('/api/mcp/predict')).toBeNull()
+    expect(screen.queryByText('/api/mcp/mark_model_abnormal')).toBeNull()
+    expect(screen.queryByText('MISSING_FEATURE')).toBeNull()
+    expect(screen.queryByText('MCP 服务地址')).toBeNull()
+  })
+
+  it('shows only the declared MCP contracts after both OpenAPI routes are confirmed', async () => {
+    vi.spyOn(apiClient, 'getMcpCapabilities').mockResolvedValue({
+      available: true,
+      predict: true,
+      markModelAbnormal: true,
+    })
+    render(<McpPage />)
+
+    expect(await screen.findByRole('heading', { name: 'MCP 服务' })).toBeTruthy()
+    expect(screen.getByText('POST /api/mcp/predict')).toBeTruthy()
+    expect(screen.getByText('POST /api/mcp/mark_model_abnormal')).toBeTruthy()
+    expect(screen.getAllByText('model_type').length).toBeGreaterThan(0)
+    expect(screen.getByText('predictions')).toBeTruthy()
+    expect(screen.getByText('error_code')).toBeTruthy()
+    expect(screen.queryByText('v0-baseline')).toBeNull()
+    expect(screen.queryByText('1250.36')).toBeNull()
+    expect(screen.queryByRole('button', { name: /预测/ })).toBeNull()
   })
 })

@@ -31,6 +31,25 @@ describe('ApiClient contracts', () => {
     expect(fetchImpl.mock.calls[0][0]).toBe('/health')
   })
 
+  it('derives MCP availability from both formal OpenAPI POST declarations', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({
+      paths: {
+        '/api/mcp/predict': { post: { responses: { '200': {} } } },
+        '/api/mcp/mark_model_abnormal': { post: { responses: { '200': {} } } },
+      },
+    }))
+    const capabilities = await new ApiClient({ fetchImpl }).getMcpCapabilities()
+    expect(fetchImpl.mock.calls[0][0]).toBe('/openapi.json')
+    expect(capabilities).toEqual({ available: true, predict: true, markModelAbnormal: true })
+
+    const missingRoute = await new ApiClient({
+      fetchImpl: vi.fn().mockResolvedValue(jsonResponse({ paths: {
+        '/api/mcp/predict': { post: {} },
+      } })),
+    }).getMcpCapabilities()
+    expect(missingRoute).toEqual({ available: false, predict: true, markModelAbnormal: false })
+  })
+
   it('uploads only the declared multipart file field', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ id: 'dataset-1' }))
     const file = new File(['time,value\n2025-01-01,1'], 'load.csv', { type: 'text/csv' })

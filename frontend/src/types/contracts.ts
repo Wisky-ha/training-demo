@@ -735,6 +735,34 @@ export interface PredictionResponse {
   predictions: number[]
 }
 
+/** Response emitted by the formal mark_model_abnormal MCP adapter. */
+export interface McpMarkModelAbnormalResponse {
+  success: true
+  model_type: ModelTypeCode
+  model_version: string
+  abnormal: boolean
+  current_model_version: string
+  alert: ModelAlert | null
+  rollback: RollbackRecord | null
+  rollback_triggered: boolean
+  alert_cleared: boolean
+}
+
+/** Shared failure envelope returned by the formal MCP adapter routes. */
+export interface McpErrorResponse {
+  success: false
+  error_code: string
+  message: string
+  details: JsonRecord
+}
+
+/** Capability flags derived from the backend's formal OpenAPI path declarations. */
+export interface McpCapabilities {
+  available: boolean
+  predict: boolean
+  markModelAbnormal: boolean
+}
+
 export interface HealthResponse {
   status: 'ok'
   service?: string
