@@ -1,93 +1,302 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiClient, ApiError } from '../api'
-import { MODEL_TYPE_CODES, MODEL_TYPE_NAMES, type ModelAlert, type ModelTypeCode, type ModelVersionSummary } from '../types/contracts'
+import { MODEL_TYPE_CODES, MODEL_TYPE_NAMES, type AuditEvent, type ModelAlert, type ModelTypeCode, type ModelVersionSummary } from '../types/contracts'
 
-function formatDate(value?: string | null) {
-  if (!value) return '尚未训练'
-  return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
+const UNKNOWN_TEXT = '未知'
+const NOT_PROVIDED_TEXT = '未提供'
+
+const lifecycleLabels: Record<string, string> = {
+  DRAFT: '草稿',
+  TRAINING: '训练中',
+  READY: '待发布',
+  PUBLISHED: '已发布',
+  RETIRED: '已下线',
+  FAILED: '失败',
+}
+const healthLabels: Record<string, string> = { HEALTHY: '健康', ABNORMAL: '异常', UNKNOWN: UNKNOWN_TEXT }
+const alertStatusLabels: Record<string, string> = {
+  ACTIVE: '活动',
+  ACKNOWLEDGED: '已确认',
+  RESOLVED: '已解决',
+  UNKNOWN: UNKNOWN_TEXT,
 }
 
-function statusLabel(model?: ModelVersionSummary) {
-  if (!model) return '未训练'
-  if (model.is_abnormal || model.health_status === 'ABNORMAL') return '异常'
-  if (!model.status) return '未知'
-  return ({ PUBLISHED: '已发布', READY: '待发布', TRAINING: '训练中', FAILED: '失败', DRAFT: '草稿', RETIRED: '已下线' } as Record<string, string>)[model.status] ?? '未知'
+function errorMessage(reason: unknown) {
+  return reason instanceof ApiError ? reason.message : reason instanceof Error ? reason.message : '请求失败，请稍后重试'
+}
+
+function formatDate(value?: string | null) {
+  if (!value) return UNKNOWN_TEXT
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return UNKNOWN_TEXT
+  try {
+    return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+  } catch {
+    return UNKNOWN_TEXT
+  }
+}
+
+function isModelType(value: string): value is ModelTypeCode {
+  return (MODEL_TYPE_CODES as readonly string[]).includes(value)
+}
+
+function productionModelsByType(models: ModelVersionSummary[]) {
+  const result = new Map<ModelTypeCode, ModelVersionSummary>()
+  models.forEach((model) => {
+    if (model.is_baseline || !model.is_current || !isModelType(model.model_type)) return
+    // A production pointer is unique by model_type even if a legacy response
+    // accidentally contains duplicate current rows.
+    if (!result.has(model.model_type)) result.set(model.model_type, model)
+  })
+  return result
+}
+
+function lifecycleLabel(model?: ModelVersionSummary) {
+  return model?.status ? lifecycleLabels[model.status] ?? UNKNOWN_TEXT : UNKNOWN_TEXT
+}
+
+function healthLabel(model?: ModelVersionSummary) {
+  const value = model?.health_status ?? 'UNKNOWN'
+  return healthLabels[value] ?? UNKNOWN_TEXT
+}
+
+function lifecycleClass(model?: ModelVersionSummary) {
+  if (model?.status === 'PUBLISHED') return 'success'
+  if (model?.status === 'FAILED') return 'danger'
+  if (model?.status === 'READY') return 'info'
+  return 'neutral'
+}
+
+function healthClass(model?: ModelVersionSummary) {
+  if (model?.health_status === 'HEALTHY') return 'success'
+  if (model?.health_status === 'ABNORMAL') return 'danger'
+  return 'neutral'
+}
+
+function modelTypeName(value?: string | null) {
+  return value && isModelType(value) ? MODEL_TYPE_NAMES[value] : UNKNOWN_TEXT
+}
+
+function alertStatusLabel(status?: ModelAlert['status'] | null) {
+  if (status !== 'ACTIVE' && status !== 'ACKNOWLEDGED' && status !== 'RESOLVED') return UNKNOWN_TEXT
+  return `${status}（${alertStatusLabels[status] ?? UNKNOWN_TEXT}）`
+}
+
+function auditObject(event: AuditEvent) {
+  const objectId = event.object_id ?? event.model_version_id ?? event.training_job_id ?? NOT_PROVIDED_TEXT
+  return {
+    type: event.object_type || UNKNOWN_TEXT,
+    name: event.model_type ? modelTypeName(event.model_type) : null,
+    id: objectId,
+  }
 }
 
 export function HomePage() {
   const [models, setModels] = useState<ModelVersionSummary[]>([])
   const [alerts, setAlerts] = useState<ModelAlert[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [activeAlertTotal, setActiveAlertTotal] = useState(0)
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
+  const [trainingFinishedAt, setTrainingFinishedAt] = useState<Record<string, string | null>>({})
+  const [modelsLoading, setModelsLoading] = useState(true)
+  const [alertsLoading, setAlertsLoading] = useState(true)
+  const [auditLoading, setAuditLoading] = useState(true)
+  const [modelsError, setModelsError] = useState<string | null>(null)
+  const [alertsError, setAlertsError] = useState<string | null>(null)
+  const [auditError, setAuditError] = useState<string | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [acknowledgingAlertId, setAcknowledgingAlertId] = useState<string | null>(null)
+  const mounted = useRef(true)
 
-  useEffect(() => {
-    let alive = true
-    Promise.all([apiClient.listModels(), apiClient.listAlerts({ page: 1, page_size: 100 })])
-      .then(([versions, activeAlerts]) => {
-        if (!alive) return
-        setModels(versions)
-        setAlerts(activeAlerts.filter((item) => item.status === 'ACTIVE'))
-      })
-      .catch((reason: unknown) => {
-        if (!alive) return
-        setError(reason instanceof ApiError ? reason.message : '无法加载模型概览，请稍后重试')
-      })
-      .finally(() => alive && setLoading(false))
-    return () => { alive = false }
+  const loadDashboard = useCallback(async () => {
+    setModelsLoading(true)
+    setAlertsLoading(true)
+    setAuditLoading(true)
+    setModelsError(null)
+    setAlertsError(null)
+    setAuditError(null)
+
+    const [modelsResult, alertsResult, auditResult] = await Promise.allSettled([
+      apiClient.listModels(),
+      apiClient.listAlerts({ status: 'ACTIVE', page: 1, page_size: 100 }),
+      apiClient.listAuditEvents({ page: 1, page_size: 10 }),
+    ])
+    if (!mounted.current) return
+
+    if (modelsResult.status === 'fulfilled') {
+      const nextModels = [...modelsResult.value]
+      setModels(nextModels)
+      const currentModels = [...productionModelsByType(nextModels).values()]
+      const finishedEntries = await Promise.all(currentModels.map(async (model) => {
+        if (!model.training_job_id) return [model.id, null] as const
+        try {
+          const job = await apiClient.getTrainingJob(model.training_job_id)
+          return [model.id, job.finished_at ?? null] as const
+        } catch {
+          // A missing or inaccessible training job is a real unknown value,
+          // not a reason to fall back to created_at or published_at.
+          return [model.id, null] as const
+        }
+      }))
+      if (!mounted.current) return
+      setTrainingFinishedAt(Object.fromEntries(finishedEntries))
+      setModelsLoading(false)
+    } else {
+      setModelsError(errorMessage(modelsResult.reason))
+      setModelsLoading(false)
+    }
+
+    if (alertsResult.status === 'fulfilled') {
+      const nextAlerts = [...alertsResult.value]
+      setAlerts(nextAlerts)
+      const total = alertsResult.value.total
+      setActiveAlertTotal(typeof total === 'number' && Number.isFinite(total)
+        ? total
+        : nextAlerts.filter((alert) => alert.status === 'ACTIVE').length)
+      setAlertsLoading(false)
+    } else {
+      setAlertsError(errorMessage(alertsResult.reason))
+      setAlertsLoading(false)
+    }
+
+    if (auditResult.status === 'fulfilled') {
+      setAuditEvents(auditResult.value.items)
+      setAuditLoading(false)
+    } else {
+      setAuditError(errorMessage(auditResult.reason))
+      setAuditLoading(false)
+    }
   }, [])
 
-  const byType = useMemo(() => {
-    const result = new Map<ModelTypeCode, ModelVersionSummary[]>()
-    MODEL_TYPE_CODES.forEach((code) => result.set(code, []))
-    models.forEach((model) => result.get(model.model_type)?.push(model))
-    return result
-  }, [models])
+  useEffect(() => {
+    mounted.current = true
+    void loadDashboard()
+    return () => { mounted.current = false }
+  }, [loadDashboard])
+
+  const productionByType = useMemo(() => productionModelsByType(models), [models])
+  const productionRows = useMemo(
+    () => MODEL_TYPE_CODES.map((code) => ({ code, model: productionByType.get(code) })),
+    [productionByType],
+  )
+  const modelById = useMemo(() => new Map(models.map((model) => [model.id, model])), [models])
+  const statistics = useMemo(() => {
+    const current = [...productionByType.values()]
+    return {
+      current: current.length,
+      healthy: current.filter((model) => model.health_status === 'HEALTHY').length,
+      unknown: current.filter((model) => (model.health_status ?? 'UNKNOWN') === 'UNKNOWN').length,
+      ready: models.filter((model) => !model.is_baseline && model.status === 'READY').length,
+    }
+  }, [models, productionByType])
+
+  const acknowledge = async (alertId: string) => {
+    setAcknowledgingAlertId(alertId)
+    setAlertsError(null)
+    try {
+      await apiClient.acknowledgeAlert(alertId)
+      setRefreshing(true)
+      await loadDashboard()
+    } catch (reason) {
+      if (mounted.current) setAlertsError(errorMessage(reason))
+    } finally {
+      if (mounted.current) {
+        setAcknowledgingAlertId(null)
+        setRefreshing(false)
+      }
+    }
+  }
 
   return (
-    <div className="page-content">
-      <section className="hero dashboard-hero">
-        <div className="hero-copy">
-          <div className="hero-kicker"><span /> MODEL STUDIO / OVERVIEW</div>
-          <p className="eyebrow">MODEL TRAINING VISUALIZATION PLATFORM</p>
-          <h1 className="page-title">训练状态，一目了然。</h1>
-          <p className="page-description">从数据上传到模型发布，在同一个工作台追踪每个模型的版本、健康状态与训练结果。</p>
-          <Link className="workflow-link" to="/workflow/model-type">开始一次训练 <span aria-hidden="true">→</span></Link>
+    <div className="page-content home-page">
+      <div className="registry-header home-header">
+        <div>
+          <p className="eyebrow">MODEL REGISTRY / 03 MODELS</p>
+          <h1 className="page-title">模型总览</h1>
         </div>
-      </section>
-
-      {error && <div className="alert-box error" role="alert">{error}<button type="button" onClick={() => window.location.reload()}>重试</button></div>}
-      {alerts.length > 0 && <div className="alert-box warning" role="status">⚠ 当前有 {alerts.length} 个模型异常告警，请检查模型健康状态。</div>}
-
-      <div className="section-heading dashboard-heading">
-        <div><h2>模型工作台</h2><p>Three model lines / production overview</p></div>
-        <span className="muted-caption">{loading ? '同步中…' : `共 ${models.length} 个版本`}</span>
+        <Link className="primary-button action-button" to="/workflow/model-type">开始训练　→</Link>
       </div>
-      <section className="model-card-grid" aria-label="模型类型概览">
-        {MODEL_TYPE_CODES.map((code) => {
-          const versions = byType.get(code) ?? []
-          const current = versions.find((version) => version.is_current) ?? versions.find((version) => version.status === 'PUBLISHED')
-          const backup = current?.previous_healthy_version_id
-            ? versions.find((version) => version.id === current.previous_healthy_version_id)
-            : versions.find((version) => version.id !== current?.id && version.status !== null && ['READY', 'PUBLISHED'].includes(version.status))
-          const alert = alerts.find((item) => item.model_type === code)
-          return (
-            <article className={`model-card${alert ? ' model-card-alert' : ''}`} key={code}>
-              <div className="model-card-top"><span className="model-symbol">{code === 'electric_load' ? '⚡' : code === 'heating_cooling_load' ? '◒' : '⌁'}</span><span className={`status-badge ${alert ? 'danger' : current ? 'success' : 'neutral'}`}>{alert ? '异常告警' : statusLabel(current)}</span></div>
-              <h3>{MODEL_TYPE_NAMES[code]}</h3>
-              <p className="model-code">{code}</p>
-              <dl className="model-facts">
-                <div><dt>当前版本</dt><dd>{current?.version ?? '—'}</dd></div>
-                <div><dt>训练时间</dt><dd>{formatDate(current?.published_at ?? current?.created_at)}</dd></div>
-                <div><dt>回滚备份</dt><dd>{backup?.version ?? '无可用备份'}</dd></div>
-              </dl>
-              {alert && <p className="card-alert">{alert.reason}</p>}
-              <div className="card-actions"><Link className="secondary-button" to={`/workflow/model-type?model=${code}`}>开始训练</Link><Link className="text-button" to="/models">查看版本 <span aria-hidden="true">↗</span></Link></div>
-            </article>
-          )
-        })}
-      </section>
-      {!loading && models.length === 0 && <div className="empty-state">还没有模型版本。选择一个模型类型开始训练。</div>}
+
+      <div className="home-dashboard-grid">
+        <div className="home-dashboard-main">
+          <section aria-label="模型统计" className="summary-stat-grid home-status-strip">
+            <div>
+              <small>生产模型</small>
+              <strong>{modelsLoading ? '加载中…' : modelsError ? '加载失败' : `${statistics.current} 个当前版本 / ${statistics.healthy} 个健康 / ${statistics.unknown} 个未知`}</strong>
+            </div>
+            <div>
+              <small>待发布候选</small>
+              <strong className={statistics.ready > 0 ? 'warning-text' : ''}>{modelsLoading ? '加载中…' : modelsError ? '加载失败' : `${statistics.ready} 个 READY 版本`}</strong>
+            </div>
+            <div>
+              <small>活动告警</small>
+              <strong className={activeAlertTotal > 0 ? 'danger-text' : ''}>{alertsLoading ? '加载中…' : alertsError ? '加载失败' : `${activeAlertTotal} 条 ACTIVE 告警`}</strong>
+            </div>
+          </section>
+
+          <section className="registry-panel home-model-panel">
+            <div className="panel-heading">
+              <div><h2>当前生产模型</h2></div>
+              {refreshing && <span className="panel-count">同步中…</span>}
+            </div>
+            {modelsLoading && <div className="loading-state"><span className="spinner" />正在加载生产模型…</div>}
+            {!modelsLoading && modelsError && <div className="alert-box error" role="alert"><span>{modelsError}</span><button type="button" onClick={() => void loadDashboard()}>重试</button></div>}
+            {!modelsLoading && !modelsError && models.length === 0 && <div className="empty-state"><strong>暂无模型版本</strong><span>当前生产版本未指定。</span></div>}
+            {!modelsLoading && !modelsError && models.length > 0 && <div className="table-wrap registry-table-wrap"><table className="registry-table home-model-table"><thead><tr><th>模型类型</th><th>当前有效</th><th>训练完成</th><th>生命周期 / 健康</th><th>入口</th></tr></thead><tbody>{productionRows.map(({ code, model }) => <tr key={code}>
+              <td><b>{MODEL_TYPE_NAMES[code]}</b></td>
+              <td><span className="version-value">{model?.version ?? '未指定'}</span></td>
+              <td>{formatDate(model ? trainingFinishedAt[model.id] : null)}</td>
+              <td><div className="home-state"><span className={`status-badge ${lifecycleClass(model)}`}>生命周期：{lifecycleLabel(model)}</span><span className={`status-badge ${healthClass(model)}`}>健康：{healthLabel(model)}</span></div></td>
+              <td><div className="row-actions"><Link className="text-button" to={`/models?model_type=${code}`}>版本</Link><Link className="text-button" to={`/workflow/model-type?model=${code}`}>训练</Link></div></td>
+            </tr>)}</tbody></table></div>}
+          </section>
+
+          <section className="registry-panel home-alert-panel">
+            <div className="panel-heading">
+              <div><h2>活动告警</h2></div>
+              {!alertsLoading && !alertsError && <span className="panel-count">{activeAlertTotal} 条</span>}
+            </div>
+            {alertsLoading && <div className="loading-state"><span className="spinner" />正在加载活动告警…</div>}
+            {!alertsLoading && alertsError && <div className="alert-box error" role="alert"><span>{alertsError}</span><button type="button" onClick={() => void loadDashboard()}>重试</button></div>}
+            {!alertsLoading && !alertsError && activeAlertTotal === 0 && <div className="empty-state compact">暂无活动告警</div>}
+            {!alertsLoading && !alertsError && activeAlertTotal > 0 && alerts.length === 0 && <div className="empty-state compact">活动告警明细未提供</div>}
+            {!alertsLoading && !alertsError && alerts.length > 0 && <div className="record-list">{alerts.map((alert) => {
+              const version = alert.model_version_id ? modelById.get(alert.model_version_id) : undefined
+              const rollback = alert.rollback_from || alert.rollback_to
+              return <div className="record-item home-alert-row" key={alert.id}>
+                <div>
+                  <b>{alert.id || NOT_PROVIDED_TEXT}</b>
+                  <span>{modelTypeName(version?.model_type ?? alert.model_type)} · 版本：{version?.version ?? alert.model_version_id ?? NOT_PROVIDED_TEXT}</span>
+                  <span>原因：{alert.reason || NOT_PROVIDED_TEXT}</span>
+                  <small>状态：{alertStatusLabel(alert.status)}</small>
+                  {rollback && <small>回滚：{alert.rollback_from ?? NOT_PROVIDED_TEXT} → {alert.rollback_to ?? NOT_PROVIDED_TEXT}</small>}
+                </div>
+                <div className="row-actions">
+                  <Link className="text-button" to="/audit">查看审计事件</Link>
+                  {alert.status === 'ACTIVE' && <button className="secondary-button action-button" disabled={acknowledgingAlertId === alert.id || refreshing} onClick={() => void acknowledge(alert.id)} type="button">{acknowledgingAlertId === alert.id ? '确认中…' : `确认告警 ${alert.id}`}</button>}
+                </div>
+              </div>
+            })}</div>}
+          </section>
+        </div>
+
+        <aside className="registry-panel compact-panel home-audit-panel">
+          <div className="panel-heading">
+            <div><h2>最近审计事件</h2></div>
+            <Link className="text-button" to="/audit">查看全部审计事件</Link>
+          </div>
+          {auditLoading && <div className="loading-state"><span className="spinner" />正在加载审计事件…</div>}
+          {!auditLoading && auditError && <div className="alert-box error" role="alert"><span>{auditError}</span><button type="button" onClick={() => void loadDashboard()}>重试</button></div>}
+          {!auditLoading && !auditError && auditEvents.length === 0 && <div className="empty-state compact">暂无审计事件</div>}
+          {!auditLoading && !auditError && auditEvents.length > 0 && <div className="record-list home-audit-list">{auditEvents.map((event) => {
+            const object = auditObject(event)
+            return <div className="record-item home-audit-item" key={event.id}>
+              <div><b>{event.event_type}</b><span>{object.type}{object.name ? ` · ${object.name}` : ''} · {object.id}</span></div>
+              <small>{formatDate(event.occurred_at)}</small>
+            </div>
+          })}</div>}
+        </aside>
+      </div>
     </div>
   )
 }

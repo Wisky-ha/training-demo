@@ -242,8 +242,10 @@ function normalizeAlertStatistics(value: unknown): AlertStatistics | null {
 
 function normalizeAlert(value: unknown): ModelAlert | null {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.model_type !== 'string') return null
-  const status = String(value.status ?? '').toUpperCase()
-  if (status !== 'ACTIVE' && status !== 'ACKNOWLEDGED' && status !== 'RESOLVED') return null
+  const rawStatus = String(value.status ?? '').toUpperCase()
+  const status = rawStatus === 'ACTIVE' || rawStatus === 'ACKNOWLEDGED' || rawStatus === 'RESOLVED'
+    ? rawStatus
+    : 'UNKNOWN'
   return {
     id: value.id,
     model_type: value.model_type as ModelAlert['model_type'],

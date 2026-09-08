@@ -28,8 +28,27 @@
 .loading-state { display: flex; min-height: 160px; align-items: center; justify-content: center; gap: 9px; color: var(--text-muted); font-size: 12px; }
 .empty-state { display: grid; gap: 7px; }.empty-state strong { color: var(--text); font-size: 13px; }
 .registry-lower-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(280px, .7fr); gap: 16px; }
+.home-dashboard-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .36fr); gap: 16px; margin-top: 28px; align-items: start; }
+.home-dashboard-main { display: grid; min-width: 0; gap: 16px; }
+.home-header { align-items: center; }
+.home-status-strip { grid-template-columns: repeat(3, 1fr); margin: 0; }
+.home-status-strip strong { line-height: 1.45; }
+.home-model-panel, .home-alert-panel, .home-audit-panel { margin-top: 0; }
+.home-model-table { min-width: 760px; }
+.home-model-table td { vertical-align: middle; }
+.version-value { color: var(--text); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 700; }
+.home-state { display: grid; gap: 5px; }
+.home-alert-row { align-items: center; }
+.home-alert-row > div:first-child { gap: 5px; }
+.home-alert-row .row-actions { justify-content: flex-end; }
+.home-audit-panel { min-width: 0; }
+.home-audit-list { gap: 10px; }
+.home-audit-item { align-items: flex-start; }
+.home-audit-item > small { white-space: nowrap; }
+@media (max-width: 900px) { .home-dashboard-grid { grid-template-columns: 1fr; }.home-status-strip { grid-template-columns: repeat(2, 1fr); }.home-audit-panel { order: 3; } }
+@media (max-width: 600px) { .home-header { display: block; }.home-header > .workflow-link, .home-header > .primary-button { margin-top: 18px; }.home-status-strip { grid-template-columns: 1fr; }.home-alert-row { display: grid; }.home-alert-row .row-actions { justify-content: flex-start; } }
 .compact-panel { min-width: 0; padding: 21px 20px; }.compact-panel .panel-heading { margin-bottom: 15px; }.compact-panel .panel-heading h2 { font-size: 16px; }
-.record-list { display: grid; gap: 8px; }.record-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }.record-item > div { display: grid; gap: 5px; min-width: 0; }.record-item b { font-size: 11px; }.record-item span, .record-item small { color: var(--text-muted); font-size: 10px; line-height: 1.5; }.record-item > small { flex: 0 0 auto; color: var(--text-subtle); }.danger-text { color: var(--danger); }.success-text { color: var(--success); }
+.record-list { display: grid; gap: 8px; }.record-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }.record-item > div { display: grid; gap: 5px; min-width: 0; }.record-item b { font-size: 11px; }.record-item span, .record-item small { color: var(--text-muted); font-size: 10px; line-height: 1.5; }.record-item > small { flex: 0 0 auto; color: var(--text-subtle); }.danger-text { color: var(--danger); }.success-text { color: var(--success); }.warning-text { color: var(--warning); }
 .rule-list { display: grid; gap: 13px; margin: 0; padding: 0; list-style: none; }.rule-list li { display: grid; gap: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }.rule-list li:last-child { padding-bottom: 0; border-bottom: 0; }.rule-list b { font-size: 11px; }.rule-list span { color: var(--text-muted); font-size: 10px; line-height: 1.65; }
 .modal-backdrop { position: fixed; z-index: 30; inset: 0; display: flex; justify-content: center; padding: 34px; overflow: auto; background: rgba(8, 15, 29, .52); }
 .confirm-dialog { align-self: center; width: min(470px, 100%); padding: 27px; border: 1px solid var(--border); border-radius: 17px; background: var(--surface); box-shadow: 0 24px 70px rgba(0, 0, 0, .25); }.confirm-dialog h2 { margin: 0; font-size: 20px; }.confirm-dialog > p:not(.eyebrow) { margin: 11px 0 16px; color: var(--text-muted); font-size: 12px; line-height: 1.7; }.confirm-model { display: grid; gap: 5px; padding: 12px; border-radius: 9px; background: var(--surface-muted); }.confirm-model b { font-size: 12px; }.confirm-model span { color: var(--text-muted); font-size: 10px; }.dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }

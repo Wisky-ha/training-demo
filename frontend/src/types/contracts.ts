@@ -669,6 +669,8 @@ export interface RollbackResponse {
 
 export const MODEL_ALERT_STATUSES = ['ACTIVE', 'ACKNOWLEDGED', 'RESOLVED'] as const
 export type ModelAlertState = (typeof MODEL_ALERT_STATUSES)[number]
+/** A response with no recognizable status remains visible as UNKNOWN. */
+export type ModelAlertStatus = ModelAlertState | 'UNKNOWN'
 export type AlertStatus = ModelAlertState
 
 export interface ModelAlert {
@@ -678,7 +680,7 @@ export interface ModelAlert {
   reason: string
   rollback_from: EntityId | null
   rollback_to: EntityId | null
-  status: ModelAlertState
+  status: ModelAlertStatus
   created_at: IsoDateTime
   acknowledged_at: IsoDateTime | null
   resolved_at: IsoDateTime | null
