@@ -228,7 +228,12 @@ function UploadStep({
   const [error, setError] = useState<string | null>(null)
   const alive = useRef(true)
 
-  useEffect(() => () => { alive.current = false }, [])
+  useEffect(() => {
+    // Vite development runs React StrictMode effect setup/cleanup twice. Reset
+    // the guard on each setup so the second (real) request is not discarded.
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
 
   const upload = async (file?: File) => {
     if (!file) return

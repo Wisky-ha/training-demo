@@ -1,3 +1,4 @@
+import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -242,6 +243,24 @@ describe('workflow acceptance flows', () => {
     expect(screen.getAllByText('dataset-1').length).toBeGreaterThan(0)
     expect(screen.getAllByText('失败').length).toBeGreaterThan(0)
     expect(screen.getByText('暂无字段摘要')).toBeTruthy()
+  })
+
+  it('keeps a completed upload under React StrictMode effect replay', async () => {
+    seedWorkflow({ modelType: 'electric_load' })
+    vi.spyOn(apiClient, 'uploadDataset').mockResolvedValue(datasetFixture())
+    vi.spyOn(apiClient, 'getDataset').mockResolvedValue(datasetFixture())
+    render(
+      <StrictMode>
+        <MemoryRouter initialEntries={['/workflow/upload']}><App /></MemoryRouter>
+      </StrictMode>,
+    )
+
+    fireEvent.change(screen.getByLabelText(/拖拽 CSV 文件到这里/), {
+      target: { files: [new File(['time,feature,target'], 'load.csv', { type: 'text/csv' })] },
+    })
+
+    expect(await screen.findAllByText('load.csv')).not.toHaveLength(0)
+    expect(screen.queryByText('正在上传并解析…')).toBeNull()
   })
 
   it('shows the explicit unused-preprocessing state when skip is selected', async () => {

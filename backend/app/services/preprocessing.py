@@ -261,11 +261,17 @@ class PreprocessingService:
         self.session = session
         self.settings = settings or get_settings()
         self.repository = PreprocessingTaskRepository(session)
+        # Dataset uploads use upload_storage_dir by default, while model and
+        # script artifacts use file_storage_root. Keep a dedicated dataset
+        # reader so the default local deployment can pass data between steps;
+        # an explicit shared storage_root still makes both roots identical.
+        dataset_root = self.settings.storage_root or self.settings.upload_storage_dir
+        self.dataset_storage = FileStorageService(dataset_root, session=session)
         self.storage = FileStorageService(self.settings.file_storage_root, session=session)
 
     def _dataset_frame(self, dataset: DatasetORM) -> pd.DataFrame:
         try:
-            content = self.storage.read_dataset(dataset.id)
+            content = self.dataset_storage.read_dataset(dataset.id)
         except (ArtifactNotFoundError, OSError) as exc:
             raise PreprocessingError("数据集文件不存在或无法读取", "DATASET_READ_FAILED") from exc
         try:

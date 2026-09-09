@@ -65,6 +65,39 @@ class Preprocessor:
 '''
 
 
+def test_default_separate_upload_and_artifact_roots_feed_preprocessing(tmp_path):
+    """The default upload directory remains readable by later workflow steps."""
+
+    settings = Settings(
+        database_url=f"sqlite:///{(tmp_path / 'separate-roots.db').as_posix()}",
+        storage_root=None,
+        model_storage_dir=tmp_path / "models",
+        upload_storage_dir=tmp_path / "uploads",
+    )
+    engine = initialize_database(settings=settings)
+    factory = create_session_factory(engine)
+    with factory() as session:
+        session.add(ModelTypeORM(code=ModelType.ELECTRIC_LOAD, name="电力"))
+        session.commit()
+    app = create_app(settings)
+    with TestClient(app) as client:
+        dataset_id = _dataset(client)
+        script_id = _script(client, GOOD, name="separate-roots")
+        response = client.post(
+            "/api/preprocessing-tasks",
+            json={
+                "model_type": "electric_load",
+                "dataset_id": dataset_id,
+                "preprocess_script_id": script_id,
+            },
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["status"] == "SUCCEEDED"
+        assert (tmp_path / "uploads" / "dataset" / f"{dataset_id}.csv").is_file()
+        assert (tmp_path / "models" / "preprocessor" / f"{response.json()['id']}.state").is_file()
+    engine.dispose()
+
+
 def test_success_has_stage_logs_summaries_and_saved_state(preprocessing_api):
     client, factory = preprocessing_api
     dataset_id = _dataset(client)

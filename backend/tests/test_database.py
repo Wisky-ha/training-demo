@@ -142,6 +142,76 @@ def test_initialize_database_recreates_audit_table_without_touching_existing_tab
         )) is not None
 
 
+def test_initialize_database_upgrades_legacy_dataset_columns():
+    """Older local databases can accept the current dataset upload record."""
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE datasets (
+                id VARCHAR(36) PRIMARY KEY,
+                file_name VARCHAR(255) NOT NULL,
+                file_path VARCHAR(1024),
+                row_count INTEGER NOT NULL,
+                columns JSON NOT NULL,
+                time_column VARCHAR(255) NOT NULL,
+                feature_columns JSON NOT NULL,
+                target_column VARCHAR(255) NOT NULL,
+                column_types JSON NOT NULL,
+                missing_value_counts JSON NOT NULL,
+                preview_rows JSON NOT NULL,
+                created_at DATETIME NOT NULL
+            )
+            """
+        )
+
+    initialize_database(engine)
+    columns = {item["name"] for item in inspect(engine).get_columns("datasets")}
+    assert {"status", "numeric_columns", "time_parse", "time_range", "summary"} <= columns
+    assert {item["name"] for item in inspect(engine).get_indexes("datasets")} >= {
+        "ix_datasets_status_created_at",
+        "ix_datasets_created_at",
+    }
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO datasets "
+                "(id, file_name, row_count, columns, time_column, feature_columns, "
+                "target_column, column_types, missing_value_counts, preview_rows, created_at) "
+                "VALUES (:id, :file_name, :row_count, :columns, :time_column, :features, "
+                ":target, :types, :missing, :preview, :created_at)"
+            ),
+            {
+                "id": "legacy-dataset",
+                "file_name": "legacy.csv",
+                "row_count": 2,
+                "columns": "[]",
+                "time_column": "timestamp",
+                "features": "[]",
+                "target": "load",
+                "types": "{}",
+                "missing": "{}",
+                "preview": "[]",
+                "created_at": "2025-01-01T00:00:00",
+            },
+        )
+        row = connection.execute(
+            text("SELECT status, numeric_columns, time_parse, time_range, summary FROM datasets WHERE id = :id"),
+            {"id": "legacy-dataset"},
+        ).mappings().one()
+    assert row["status"] == "parsed"
+    assert row["numeric_columns"] == "[]"
+    assert row["time_parse"] == "{}"
+    assert row["time_range"] == "{}"
+    assert row["summary"] == "{}"
+    engine.dispose()
+
+
 def test_initialize_database_upgrades_legacy_health_status_constraint():
     """Existing SQLite rows accept the new explicit UNKNOWN health state."""
 

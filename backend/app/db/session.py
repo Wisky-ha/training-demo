@@ -106,6 +106,7 @@ def initialize_database(
     active_engine = engine if engine is not None else create_database_engine(settings)
     _configure_sqlite_foreign_keys(active_engine)
     Base.metadata.create_all(active_engine)
+    _upgrade_dataset_columns(active_engine)
     _upgrade_audit_event_indexes(active_engine)
     _upgrade_training_job_columns(active_engine)
     _upgrade_rollback_record_columns(active_engine)
@@ -115,6 +116,41 @@ def initialize_database(
     _upgrade_model_alert_columns(active_engine)
     _upgrade_publish_record_columns(active_engine)
     return active_engine
+
+
+def _upgrade_dataset_columns(engine: Engine) -> None:
+    """Add dataset inspection fields used by the current workflow.
+
+    ``create_all`` does not alter an existing SQLite table.  Databases created
+    before the dataset-status/inspection contract therefore need these
+    additive columns before an upload can be persisted.  Defaults preserve
+    existing rows and do not rewrite the source CSV or its resource IDs.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    inspector = inspect(engine)
+    if not inspector.has_table("datasets"):
+        return
+    columns = {item["name"] for item in inspector.get_columns("datasets")}
+    additions = {
+        "status": "VARCHAR(10) NOT NULL DEFAULT 'parsed'",
+        "numeric_columns": "JSON NOT NULL DEFAULT '[]'",
+        "time_parse": "JSON NOT NULL DEFAULT '{}'",
+        "time_range": "JSON NOT NULL DEFAULT '{}'",
+        "summary": "JSON NOT NULL DEFAULT '{}'",
+    }
+    with engine.begin() as connection:
+        for name, definition in additions.items():
+            if name not in columns:
+                connection.execute(text(f"ALTER TABLE datasets ADD COLUMN {name} {definition}"))
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_datasets_status_created_at "
+            "ON datasets (status, created_at)"
+        ))
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_datasets_created_at "
+            "ON datasets (created_at)"
+        ))
 
 
 def _upgrade_audit_event_indexes(engine: Engine) -> None:
@@ -315,6 +351,7 @@ def _upgrade_training_job_columns(engine: Engine) -> None:
     columns = {item["name"] for item in inspect(engine).get_columns("training_jobs")}
     additions = {
         "preprocessing_task_id": "VARCHAR(36)",
+        "stage_started_at": "DATETIME",
         "started_at": "DATETIME",
         "current_stage": "VARCHAR(100)",
         "error_code": "VARCHAR(100)",
