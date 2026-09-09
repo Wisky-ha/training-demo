@@ -29,6 +29,7 @@ _ALLOWED_IMPORTS = {
     "datetime",
     "itertools",
     "joblib",
+    "lightgbm",
     "logging",
     "math",
     "numpy",
