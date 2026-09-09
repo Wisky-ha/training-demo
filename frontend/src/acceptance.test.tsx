@@ -154,6 +154,63 @@ describe('API client browser integration', () => {
 })
 
 describe('workflow acceptance flows', () => {
+  it('shows the platform input contract next to CSV upload without changing the upload flow', () => {
+    useAppStore.getState().setWorkflowContext({ modelType: 'electric_load' })
+    renderApp('/workflow/upload')
+
+    expect(screen.getByText('平台输入校验（执行契约，不是业务逻辑说明）')).toBeTruthy()
+    expect(screen.getByText('.csv')).toBeTruthy()
+    expect(screen.getByText(/UTF-8 或 GB18030.*不超过 50 MB/)).toBeTruthy()
+    expect(screen.getByText(/首列.*时间列.*末列.*有限数值目标列.*中间列.*特征/)).toBeTruthy()
+    expect(screen.getByText(/至少 2 行.*特征允许缺失.*不能整列为空/)).toBeTruthy()
+    expect(screen.getByText(/平台只读取并保存，原始文件不改写/)).toBeTruthy()
+    expect(screen.getByLabelText(/拖拽 CSV 文件到这里/)).toBeTruthy()
+  })
+
+  it('shows the preprocessing execution contract and real failure codes', async () => {
+    seedWorkflow({ modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture() })
+    vi.spyOn(apiClient, 'getDataset').mockResolvedValue(datasetFixture())
+    vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [], pagination: { page: 1, page_size: 20, total: 0, total_pages: 0 } })
+    renderApp('/workflow/preprocess')
+
+    expect(await screen.findByText('平台执行契约（不限制具体业务算法）')).toBeTruthy()
+    expect(screen.getByText('fit(df, config)')).toBeTruthy()
+    expect(screen.getByText('transform(df, config)')).toBeTruthy()
+    for (const code of [
+      'INVALID_SCRIPT', 'INVALID_PREPROCESSOR', 'UNSAFE_SCRIPT', 'PREPROCESS_FIT_FAILED',
+      'PREPROCESS_FIT_RETURN_INVALID', 'PREPROCESS_TRANSFORM_FAILED',
+      'PREPROCESS_RESULT_NOT_DATAFRAME', 'PREPROCESS_FIELDS_INVALID',
+      'PREPROCESS_FEATURES_EMPTY', 'PREPROCESS_VALUES_INVALID',
+    ]) {
+      expect(screen.getByText(new RegExp(code))).toBeTruthy()
+    }
+    expect(screen.getByRole('button', { name: /执行并继续/ })).toBeTruthy()
+  })
+
+  it('shows the training execution contract and keeps the training entry action available', async () => {
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(), splitId: 'split-1', split: splitFixture(),
+    })
+    vi.spyOn(apiClient, 'getDataset').mockResolvedValue(datasetFixture())
+    vi.spyOn(apiClient, 'getPreprocessingTask').mockResolvedValue(preprocessFixture())
+    vi.spyOn(apiClient, 'getDatasetSplit').mockResolvedValue(splitFixture())
+    vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [trainerFixture], pagination: { page: 1, page_size: 20, total: 1, total_pages: 1 } })
+    renderApp('/workflow/train')
+
+    expect(await screen.findByText('平台执行契约（不限制具体业务算法）')).toBeTruthy()
+    expect(screen.getByText(/train\(X_train, y_train, X_test, y_test, config\)/)).toBeTruthy()
+    expect(screen.getByText(/predict\(X\)/)).toBeTruthy()
+    for (const code of [
+      'INVALID_SCRIPT', 'TRAIN_FUNCTION_INVALID', 'TRAIN_SIGNATURE_INVALID',
+      'MODEL_PREDICT_INVALID', 'UNSAFE_SCRIPT', 'PREDICTION_FAILED',
+      'PREDICTION_LENGTH_INVALID', 'PREDICTION_VALUES_INVALID',
+    ]) {
+      expect(screen.getByText(new RegExp(code))).toBeTruthy()
+    }
+    expect(screen.getByRole('button', { name: '启动训练' })).toBeTruthy()
+  })
+
   it('redirects to model type when navigating without a selected model type', async () => {
     renderApp('/workflow/upload')
 

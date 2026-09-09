@@ -164,6 +164,11 @@
 .workflow-page .workflow-panel .panel-heading h2 { margin: 0; font-size: 13px; letter-spacing: 0; }
 .workflow-page .workflow-panel .panel-heading p:not(.eyebrow) { margin: 0; }
 .workflow-page .alert-box { margin: 14px 0; padding: 10px 12px; border-radius: 0; }
+.workflow-page .workflow-contract-note { display: grid; width: 100%; gap: 6px; align-items: start; }
+.workflow-page .workflow-contract-note > strong { color: var(--text); font-size: 12px; }
+.workflow-page .workflow-contract-note ul { display: grid; gap: 3px; margin: 0; padding-left: 18px; font-size: 11px; line-height: 1.55; }
+.workflow-page .workflow-contract-note p { margin: 0; font-size: 11px; line-height: 1.55; }
+.workflow-page .workflow-contract-note code { color: var(--text); font: 10px "JetBrains Mono", monospace; overflow-wrap: anywhere; }
 .workflow-page .model-select-grid {
   display: flex;
   flex-wrap: wrap;

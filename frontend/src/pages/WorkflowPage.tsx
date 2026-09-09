@@ -78,6 +78,17 @@ function InfoBox({ children, tone = 'info' }: { children: ReactNode; tone?: 'inf
   return <div className={`alert-box ${tone}`} role="status">{children}</div>
 }
 
+function ContractNote({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <InfoBox>
+      <div className="workflow-contract-note">
+        <strong>{title}</strong>
+        {children}
+      </div>
+    </InfoBox>
+  )
+}
+
 function Button({
   children,
   disabled,
@@ -249,6 +260,14 @@ function UploadStep({
         </div>
       </div>
       <ErrorBox message={error} />
+      <ContractNote title="平台输入校验（执行契约，不是业务逻辑说明）">
+        <ul>
+          <li>文件格式：仅接受 <code>.csv</code>；内容编码为 UTF-8 或 GB18030；文件大小不超过 50 MB。</li>
+          <li>字段位置：首列必须是可解析且不重复的时间列；末列必须是有限数值目标列；中间列作为特征。</li>
+          <li>数据量与特征：至少 2 行；特征允许缺失，但不能整列为空。</li>
+        </ul>
+        <p>以上是平台输入校验；平台只读取并保存，原始文件不改写。</p>
+      </ContractNote>
       {!dataset && (
         <label
           className={`drop-zone${dragging ? ' dragging' : ''}`}
@@ -420,6 +439,16 @@ function PreprocessStep({
         </div>
       </div>
       <ErrorBox message={error} />
+      <ContractNote title="平台执行契约（不限制具体业务算法）">
+        <ul>
+          <li>脚本文件：仅接受 <code>.py</code>；使用 UTF-8；大小不超过 5 MiB；Python 语法必须有效。</li>
+          <li>执行接口：必须且只能定义一个 <code>Preprocessor</code> 类；<code>fit(df, config)</code> 与 <code>transform(df, config)</code> 必须是可调用的两参数方法；<code>fit</code> 返回 <code>self</code>，<code>transform</code> 返回 <code>pandas.DataFrame</code>。</li>
+          <li>输出契约：输出行数须与输入一致；保留时间列、目标列和至少一个特征；训练集与测试集输出字段一致，字段名非空且不重复；非时间字段的非空值须可转换为有限数值，缺失值可保留。</li>
+          <li>安全约束：仅允许导入平台白名单模块，禁止危险调用（如 <code>open</code>、<code>eval</code>、<code>exec</code>、<code>compile</code>、<code>input</code>）。</li>
+        </ul>
+        <p><b>不满足时会报错；代表性错误码：</b> <code>INVALID_SCRIPT</code>、<code>INVALID_PREPROCESSOR</code>、<code>UNSAFE_SCRIPT</code>、<code>PREPROCESS_FIT_FAILED</code>、<code>PREPROCESS_FIT_RETURN_INVALID</code>、<code>PREPROCESS_TRANSFORM_FAILED</code>、<code>PREPROCESS_RESULT_NOT_DATAFRAME</code>、<code>PREPROCESS_ROW_COUNT_INVALID</code>、<code>PREPROCESS_FIELDS_INVALID</code>、<code>PREPROCESS_FEATURES_EMPTY</code>、<code>PREPROCESS_VALUES_INVALID</code>。</p>
+        <p><code>fit</code>/<code>transform</code> 是平台执行接口与输出契约，不是业务规则；具体业务算法可自行选择。</p>
+      </ContractNote>
       <div className="choice-row">
         <label className={`skip-option${skip ? ' checked' : ''}`}>
           <input
@@ -799,6 +828,16 @@ function TrainingStep({
         </div>
       </div>
       <ErrorBox message={error} />
+      <ContractNote title="平台执行契约（不限制具体业务算法）">
+        <ul>
+          <li>脚本文件：仅接受 <code>.py</code>；使用 UTF-8；大小不超过 5 MiB；Python 语法必须有效。</li>
+          <li>执行入口：必须定义 <code>train(X_train, y_train, X_test, y_test, config)</code>；返回对象必须有可调用的 <code>predict(X)</code>。</li>
+          <li>输出契约：训练流程调用 <code>predict(X_test)</code> 时，结果须为一维、长度与测试集行数一致且可转换为有限数值。</li>
+          <li>安全约束：仅允许导入平台白名单模块，禁止危险调用（如 <code>open</code>、<code>eval</code>、<code>exec</code>、<code>compile</code>、<code>input</code>）。</li>
+        </ul>
+        <p><b>不满足时会报错；代表性错误码：</b> <code>INVALID_SCRIPT</code>、<code>TRAIN_FUNCTION_INVALID</code>、<code>TRAIN_SIGNATURE_INVALID</code>、<code>MODEL_PREDICT_INVALID</code>、<code>UNSAFE_SCRIPT</code>、<code>TRAIN_EXECUTION_FAILED</code>、<code>PREDICTION_FAILED</code>、<code>PREDICTION_LENGTH_INVALID</code>、<code>PREDICTION_VALUES_INVALID</code>。</p>
+        <p>算法实现可自行选择，只要满足上述执行接口和输出契约；本说明不是业务逻辑说明。</p>
+      </ContractNote>
       {!job && (
         <>
         <label className="secondary-button action-button">
