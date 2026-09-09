@@ -555,6 +555,92 @@ class ModelLifecycleService:
             self.session.commit()
             return version
 
+    def delete_candidate(
+        self,
+        version_id: str,
+        audit_context: AuditContext | None = None,
+    ) -> dict[str, Any]:
+        """Remove an unpublished training candidate and its model artifact.
+
+        Lifecycle ``DELETE`` is deliberately limited to the transient
+        DRAFT/READY/FAILED candidate produced by the current training flow.
+        Published or retired versions are historical records and must keep
+        their artifacts for prediction, rollback, and auditability.
+        """
+        version = self.get(version_id)
+        if version is None:
+            raise ModelNotFoundError()
+        if version.is_baseline:
+            raise ModelLifecycleError("系统基线不能删除", "MODEL_BASELINE_IMMUTABLE")
+
+        with self._lock_for(version.model_type):
+            record = self._lock_type(version.model_type)
+            version = self.get(version_id)
+            if version is None:
+                raise ModelNotFoundError()
+            if version.is_baseline:
+                raise ModelLifecycleError("系统基线不能删除", "MODEL_BASELINE_IMMUTABLE")
+            if version.is_current or record.current_version_id == version.id:
+                raise ModelLifecycleError("当前生产模型不能删除", "MODEL_DELETE_STATE_INVALID")
+            if version.status not in {
+                ModelVersionStatus.DRAFT,
+                ModelVersionStatus.READY,
+                ModelVersionStatus.FAILED,
+            }:
+                raise ModelLifecycleError(
+                    "只有本次训练生成的未发布模型才能删除",
+                    "MODEL_DELETE_STATE_INVALID",
+                )
+
+            # Keep the audit event even though the resource itself is removed;
+            # the nullable model-version FK is cleared by SQLite's SET NULL
+            # action while object_id retains the deleted resource ID.
+            record_audit_event(
+                self.session,
+                event_type="MODEL_DELETED",
+                object_type="MODEL_VERSION",
+                object_id=version.id,
+                model_type=version.model_type,
+                model_version_id=version.id,
+                training_job_id=version.training_job_id,
+                message="本次训练模型文件已删除",
+                metadata={
+                    "version": version.version,
+                    "model_path": version.model_path,
+                },
+                context=audit_context,
+            )
+            self.session.delete(version)
+            try:
+                self.session.flush()
+                model_artifact_deleted = self.storage.remove(
+                    ArtifactType.MODEL, version_id
+                )
+                self.session.commit()
+            except IntegrityError as exc:
+                self.session.rollback()
+                raise ModelLifecycleError(
+                    "模型仍被发布或回滚记录引用，不能删除",
+                    "MODEL_DELETE_REFERENCED",
+                ) from exc
+            except Exception as exc:
+                self.session.rollback()
+                raise ModelLifecycleError(
+                    "模型文件删除失败",
+                    "MODEL_ARTIFACT_DELETE_FAILED",
+                ) from exc
+
+            return {
+                "operation": "delete",
+                "model_version_id": version_id,
+                "deleted": True,
+                "model_artifact_deleted": model_artifact_deleted,
+            }
+
+    # The evaluation decision calls this operation a discard; retain both
+    # names for service integrations that use either vocabulary.
+    delete_candidate_artifacts = delete_candidate
+
     def rollback(self, model_id: str, *, target_version_id: str | None = None,
                  target_version: str | None = None, reason: str = "手动回滚",
                  idempotency_key: str | None = None,

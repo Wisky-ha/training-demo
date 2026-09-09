@@ -16,6 +16,7 @@ from .schemas.models import (
     LifecycleOperationResponse,
     ModelAbnormalRequest,
     ModelAlertResponse,
+    ModelDeletionResponse,
     ModelSaveRequest,
     ModelVersionResponse,
     PublishRequest,
@@ -58,7 +59,8 @@ def _error(exc: ModelLifecycleError) -> HTTPException:
         "PUBLISH_STATE_INVALID", "OFFLINE_STATE_INVALID", "ROLLBACK_STATE_INVALID",
         "ROLLBACK_TARGET_INVALID", "ROLLBACK_TARGET_NOT_FOUND", "MODEL_HEALTH_INVALID",
         "ABNORMAL_STATE_INVALID", "NO_HEALTHY_BACKUP", "NO_HEALTHY_ROLLBACK_VERSION",
-        "MODEL_BASELINE_IMMUTABLE", "MODEL_BASELINE_INVALID",
+        "MODEL_BASELINE_IMMUTABLE", "MODEL_BASELINE_INVALID", "MODEL_DELETE_REFERENCED",
+        "MODEL_ARTIFACT_DELETE_FAILED", "MODEL_DELETE_STATE_INVALID",
     }:
         response_status = status.HTTP_409_CONFLICT
     else:
@@ -279,9 +281,50 @@ def retire_model(model_id: str, request: Request, session: Session = Depends(get
     return _retire(model_id, request, session)
 
 
-@router.delete("/{model_id}", response_model=LifecycleOperationResponse, include_in_schema=False)
+def _delete_candidate(model_id: str, request: Request, session: Session):
+    service = _service(request, session)
+    version_for_audit = service.get(model_id)
+    try:
+        return service.delete_candidate(model_id, context_from_request(request))
+    except ModelLifecycleError as exc:
+        record_failure_audit_event(
+            session,
+            event_type="MODEL_DELETED",
+            object_type="MODEL_VERSION",
+            object_id=model_id,
+            model_type=version_for_audit.model_type if version_for_audit is not None else None,
+            model_version_id=version_for_audit.id if version_for_audit is not None else None,
+            training_job_id=version_for_audit.training_job_id if version_for_audit is not None else None,
+            message=str(exc),
+            metadata={"error_code": exc.code},
+            context=context_from_request(request),
+        )
+        raise _error(exc) from exc
+
+
+@router.delete("/{model_id}/artifacts", response_model=ModelDeletionResponse)
+def delete_model_artifacts(model_id: str, request: Request, session: Session = Depends(get_session)):
+    """Hard-delete the unpublished model artifact for an evaluation decision."""
+    return _delete_candidate(model_id, request, session)
+
+
+@router.delete("/{model_id}/discard", response_model=None, include_in_schema=False)
+def discard_model_candidate(model_id: str, request: Request, session: Session = Depends(get_session)):
+    """Compatibility spelling for discarding an unpublished candidate."""
+    return _delete_candidate(model_id, request, session)
+
+
+@router.delete("/{model_id}", response_model=None, include_in_schema=False)
 def delete_model_as_offline(model_id: str, request: Request, session: Session = Depends(get_session)):
-    """Compatibility alias: deleting an API resource never deletes its artifact."""
+    """Delete an unpublished candidate; retain offline behavior for history."""
+    service = _service(request, session)
+    version = service.get(model_id)
+    if version is not None and not version.is_baseline and not version.is_current and version.status in {
+        ModelVersionStatus.DRAFT,
+        ModelVersionStatus.READY,
+        ModelVersionStatus.FAILED,
+    }:
+        return _delete_candidate(model_id, request, session)
     return _retire(model_id, request, session)
 
 

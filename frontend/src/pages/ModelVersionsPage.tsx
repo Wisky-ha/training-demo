@@ -644,7 +644,15 @@ export function ModelVersionsPage() {
         <div className="panel-heading"><div><p className="eyebrow">{selectedType.toUpperCase()}</p><h2>{MODEL_TYPE_NAMES[selectedType]} · 版本列表</h2></div><span className="panel-count">{loading ? '加载中…' : `${versions.length} 个版本`}</span></div>
         {loading && <div className="loading-state"><span className="spinner" />正在加载模型版本…</div>}
         {!loading && !versions.length && <div className="empty-state"><strong>暂无{MODEL_TYPE_NAMES[selectedType]}版本</strong><span>完成训练并保存 READY 版本后会显示在这里。</span></div>}
-        {!loading && versions.length > 0 && <div className="table-wrap registry-table-wrap"><table aria-label="版本列表" className="registry-table model-version-table"><thead><tr><th>版本号</th><th>版本标题</th><th>训练完成时间</th><th>训练脚本名称</th><th>生命周期</th><th>健康状态</th></tr></thead><tbody>{versions.map((model) => <tr className={model.id === activeSelectedId ? 'current-row' : ''} data-model-version-id={model.id} key={model.id}>
+        {!loading && versions.length > 0 && <div className="table-wrap registry-table-wrap"><table aria-label="版本列表" className="registry-table model-version-table"><thead><tr><th>版本号</th><th>版本标题</th><th>训练完成时间</th><th>训练脚本名称</th><th>生命周期</th><th>健康状态</th></tr></thead><tbody>{versions.map((model) => <tr className={model.id === activeSelectedId ? 'current-row' : ''} data-model-version-id={model.id} key={model.id} onClick={(event) => {
+          // The version number remains an explicit keyboard target, while the
+          // rest of the source-backed row is also selectable like the
+          // prototype's version list. Do not let lifecycle action buttons
+          // change the selected detail as a side effect of bubbling.
+          const target = event.target as HTMLElement | null
+          if (target?.closest('button, a, input, select, textarea')) return
+          void openDetails(model)
+        }}>
           <td><button aria-label={model.version} className="version-link" onClick={() => void openDetails(model)} type="button"><b>{model.version}</b></button></td>
           <td>{versionTitle(model)}</td>
           <td>{trainingFinished(model, trainingFinishedAt)}</td>

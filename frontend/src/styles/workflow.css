@@ -525,6 +525,18 @@
 }
 
 .workflow-page .workflow-header { margin-bottom: 21px; }
+.workflow-page .evaluation-decision {
+  display: grid;
+  gap: 12px;
+  margin-top: 24px;
+  padding: 16px 0;
+  border-top: 2px solid var(--ink);
+  border-bottom: 1px solid var(--line);
+}
+.workflow-page .evaluation-decision strong { color: var(--text); font-size: 13px; }
+.workflow-page .evaluation-decision p { margin: 6px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+.workflow-page .evaluation-decision small { color: var(--text-subtle); font-size: 10px; }
+.workflow-page .evaluation-decision .publish-actions { justify-content: flex-start; }
 
 @media (max-width: 600px) {
   .workflow-page .chart-card { height: 204px; }

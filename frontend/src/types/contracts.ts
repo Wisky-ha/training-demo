@@ -45,6 +45,13 @@ export type ScriptStatus = 'ENABLED' | 'DISABLED'
 export type LegacyScriptStatus = 'enabled' | 'disabled'
 export type ScriptStatusWire = ScriptStatus | LegacyScriptStatus
 
+export interface ScriptDeletionResponse {
+  operation: 'delete' | string
+  script_id: EntityId
+  deleted: boolean
+  source_file_deleted: boolean
+}
+
 export interface ScriptContract {
   id: EntityId
   name: string
@@ -559,6 +566,13 @@ export interface ModelVersionResponse extends ModelVersionSummary {
   split_ratio: 0.8
   test_ratio: 0.2
   metrics: JsonRecord
+}
+
+export interface ModelDeletionResponse {
+  operation: 'delete' | string
+  model_version_id: EntityId
+  deleted: boolean
+  model_artifact_deleted: boolean
 }
 
 export interface ModelSaveRequest {

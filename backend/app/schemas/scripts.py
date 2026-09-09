@@ -71,6 +71,17 @@ class ScriptResponse(BaseModel):
     uploaded_at: datetime
 
 
+class ScriptDeletionResponse(BaseModel):
+    """Result of deleting a script source used by a training decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: str = "delete"
+    script_id: ResourceId
+    deleted: bool
+    source_file_deleted: bool
+
+
 class PaginationMeta(BaseModel):
     page: int
     page_size: int

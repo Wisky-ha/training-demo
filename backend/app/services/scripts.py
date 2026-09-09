@@ -12,11 +12,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..core.config import Settings, get_settings
-from ..db.models import ModelTypeORM, ScriptORM
+from ..db.models import (
+    ModelTypeORM,
+    ModelVersionORM,
+    PreprocessingTaskORM,
+    ScriptORM,
+    TrainingJobORM,
+)
 from ..db.repositories import ScriptRepository
 from ..domain.enums import ModelType, ScriptStatus, ScriptType
-from ..schemas.scripts import ScriptResponse, ScriptUploadMetadata
+from ..schemas.scripts import ScriptDeletionResponse, ScriptResponse, ScriptUploadMetadata
 from ..storage import ArtifactType, FileStorageService
+from .audit_events import AuditContext, record_audit_event
 
 
 class InvalidScriptFileError(ValueError):
@@ -183,6 +190,75 @@ class ScriptService:
             self.session.rollback()
             raise ScriptPersistenceError("could not update script status") from exc
         return script
+
+    def delete(
+        self,
+        script_id: str,
+        audit_context: AuditContext | None = None,
+    ) -> ScriptDeletionResponse | None:
+        """Delete a script source used by the current training decision.
+
+        Script rows are shared by jobs and historical model versions.  When a
+        row is still referenced, the source file and artifact metadata are
+        removed but the row is retained as DISABLED so those immutable
+        references remain valid.  Truly unreferenced scripts are removed
+        completely.
+        """
+        script = self.repository.get(script_id)
+        if script is None:
+            return None
+
+        storage = FileStorageService(
+            self.settings.script_file_storage_root,
+            session=self.session,
+        )
+        referenced = any(
+            self.session.scalar(select(model.id).where(column == script_id).limit(1)) is not None
+            for model, column in (
+                (TrainingJobORM, TrainingJobORM.train_script_id),
+                (TrainingJobORM, TrainingJobORM.preprocess_script_id),
+                (PreprocessingTaskORM, PreprocessingTaskORM.preprocess_script_id),
+                (ModelVersionORM, ModelVersionORM.train_script_id),
+                (ModelVersionORM, ModelVersionORM.preprocess_script_id),
+            )
+        )
+        try:
+            source_file_deleted = storage.remove(ArtifactType.SCRIPT, script_id)
+            if referenced:
+                script.status = ScriptStatus.DISABLED
+                deleted = False
+            else:
+                self.session.delete(script)
+                self.session.flush()
+                deleted = True
+            record_audit_event(
+                self.session,
+                event_type="SCRIPT_DELETED",
+                object_type="SCRIPT",
+                object_id=script_id,
+                message="训练决策中的脚本源文件已删除",
+                metadata={
+                    "source_file_deleted": source_file_deleted,
+                    "row_deleted": deleted,
+                    "referenced": referenced,
+                },
+                context=audit_context,
+            )
+            self.session.commit()
+        except Exception as exc:
+            self.session.rollback()
+            if isinstance(exc, ScriptPersistenceError):
+                raise
+            raise ScriptPersistenceError("could not delete script source") from exc
+        return ScriptDeletionResponse(
+            script_id=script_id,
+            deleted=deleted,
+            source_file_deleted=source_file_deleted,
+        )
+
+    # Explicit name for callers that want to distinguish hard source cleanup
+    # from the enable/disable library state operations.
+    delete_script = delete
 
     def list(
         self,

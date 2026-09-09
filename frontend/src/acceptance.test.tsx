@@ -498,6 +498,70 @@ describe('workflow acceptance flows', () => {
     })))
   })
 
+  it('offers explicit save/delete/publish decisions on the evaluation page', async () => {
+    const succeededJob = trainingFixture()
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(), splitId: 'split-1', split: splitFixture(),
+      trainScriptId: 'trainer-1', trainingJobId: 'job-1', trainingJob: succeededJob,
+      modelVersionId: 'model-1', modelVersion: baseModel({ status: 'DRAFT' }), evaluation: evaluationFixture(),
+    })
+    mockWorkflowReads({ job: succeededJob, model: baseModel({ status: 'DRAFT' }) })
+    const save = vi.spyOn(apiClient, 'saveModel').mockResolvedValue(baseModel({ status: 'READY' }))
+    const publish = vi.spyOn(apiClient, 'publishModel')
+
+    renderApp('/workflow/evaluate')
+
+    expect(await screen.findByRole('button', { name: /保存.*不生效/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /删除.*模型.*脚本/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '发布' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /保存.*不生效/ }))
+
+    await waitFor(() => expect(save).toHaveBeenCalledWith('model-1', expect.objectContaining({ status: 'READY' })))
+    await waitFor(() => expect(useAppStore.getState().workflow.modelType).toBeNull())
+    expect(publish).not.toHaveBeenCalled()
+  })
+
+  it('deletes the candidate model and both selected script files before clearing workflow state', async () => {
+    const succeededJob = trainingFixture()
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessScriptId: 'preprocess-1', preprocessTaskId: 'task-1', preprocessTask: preprocessFixture({ preprocess_script_id: 'preprocess-1' }),
+      splitId: 'split-1', split: splitFixture(), trainScriptId: 'trainer-1', trainingJobId: 'job-1', trainingJob: succeededJob,
+      modelVersionId: 'model-1', modelVersion: baseModel({ status: 'READY' }), evaluation: evaluationFixture(),
+    })
+    mockWorkflowReads({ job: succeededJob, model: baseModel({ status: 'READY' }) })
+    const deleteModel = vi.spyOn(apiClient, 'deleteModel').mockResolvedValue({ operation: 'delete', model_version_id: 'model-1', deleted: true, model_artifact_deleted: true })
+    const deleteScript = vi.spyOn(apiClient, 'deleteScript').mockResolvedValue({ operation: 'delete', script_id: 'script-1', deleted: true, source_file_deleted: true })
+
+    renderApp('/workflow/evaluate')
+    fireEvent.click(await screen.findByRole('button', { name: /删除.*模型.*脚本/ }))
+
+    await waitFor(() => expect(deleteModel).toHaveBeenCalledWith('model-1'))
+    await waitFor(() => expect(deleteScript).toHaveBeenCalledWith('trainer-1'))
+    await waitFor(() => expect(deleteScript).toHaveBeenCalledWith('preprocess-1'))
+    await waitFor(() => expect(useAppStore.getState().workflow.modelType).toBeNull())
+  })
+
+  it('defaults to saving the candidate when the evaluation page is left without a decision', async () => {
+    const succeededJob = trainingFixture()
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(), splitId: 'split-1', split: splitFixture(),
+      trainScriptId: 'trainer-1', trainingJobId: 'job-1', trainingJob: succeededJob,
+      modelVersionId: 'model-1', modelVersion: baseModel({ status: 'DRAFT' }), evaluation: evaluationFixture(),
+    })
+    mockWorkflowReads({ job: succeededJob, model: baseModel({ status: 'DRAFT' }) })
+    const save = vi.spyOn(apiClient, 'saveModel').mockResolvedValue(baseModel({ status: 'READY' }))
+    const view = renderApp('/workflow/evaluate')
+    await screen.findByRole('button', { name: /保存.*不生效/ })
+
+    view.unmount()
+
+    await waitFor(() => expect(save).toHaveBeenCalledWith('model-1', expect.objectContaining({ status: 'READY' })))
+    await waitFor(() => expect(useAppStore.getState().workflow.modelType).toBeNull())
+  })
+
   it('does not let an upload response from the old model type repopulate the new chain', async () => {
     let resolveUpload!: (value: DatasetUploadResult) => void
     const pendingUpload = new Promise<DatasetUploadResult>((resolve) => { resolveUpload = resolve })

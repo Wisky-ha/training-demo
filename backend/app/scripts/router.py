@@ -18,9 +18,11 @@ from ..db.session import get_session
 from ..domain.enums import ModelType, ScriptStatus, ScriptType
 from ..schemas.scripts import (
     PaginatedScriptsResponse,
+    ScriptDeletionResponse,
     ScriptResponse,
     ScriptUploadMetadata,
 )
+from ..services.audit_events import context_from_request, record_failure_audit_event
 from ..services.scripts import (
     DuplicateScriptVersionError,
     InvalidScriptFileError,
@@ -141,6 +143,42 @@ def get_script(script_id: str, session: Session = Depends(get_session)) -> dict[
     """Return one immutable script version and its saved source."""
 
     return _script_response(ScriptService(session), script_id)
+
+
+@router.delete("/{script_id}", response_model=ScriptDeletionResponse)
+def delete_script(
+    script_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> ScriptDeletionResponse:
+    """Discard a training-decision script source on the real backend.
+
+    This is intentionally separate from ``/disable``: disabling only hides a
+    reusable library entry, while this operation removes the source artifact.
+    Referenced history rows are retained as disabled records.
+    """
+    service = ScriptService(
+        session,
+        settings=getattr(request.app.state, "settings", None),
+    )
+    try:
+        result = service.delete(script_id, context_from_request(request))
+    except ScriptPersistenceError as exc:
+        record_failure_audit_event(
+            session,
+            event_type="SCRIPT_DELETED",
+            object_type="SCRIPT",
+            object_id=script_id,
+            message=str(exc),
+            metadata={"error_code": "SCRIPT_DELETE_ERROR"},
+            context=context_from_request(request),
+        )
+        raise HTTPException(status_code=500, detail={
+            "code": "SCRIPT_DELETE_ERROR", "message": str(exc)
+        }) from exc
+    if result is None:
+        raise _not_found(script_id)
+    return result
 
 
 @router.post("/{script_id}/enable", response_model=ScriptResponse)

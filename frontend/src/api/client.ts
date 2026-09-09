@@ -31,10 +31,12 @@ import type {
   PublishModelInput,
   PublishModelResponse,
   PublishRecord,
+  ModelDeletionResponse,
   ModelSaveRequest,
   RollbackModelInput,
   RollbackRecord,
   ScriptContract,
+  ScriptDeletionResponse,
   ScriptUploadInput,
   TrainingJob,
   TrainingLogsParams,
@@ -474,6 +476,10 @@ export class ApiClient {
     return this.request<T>(path, 'POST', formData, options)
   }
 
+  delete<T>(path: string, options?: RequestOptions): Promise<T> {
+    return this.request<T>(path, 'DELETE', undefined, options)
+  }
+
   async getHealth(options?: RequestOptions): Promise<HealthResponse> {
     // /health is the declared contract. The fallback is only for deployments
     // that expose the legacy /api/health alias; it also avoids /api/api/health.
@@ -581,6 +587,20 @@ export class ApiClient {
   saveModel(id: EntityId, input: ModelSaveRequest): Promise<ModelVersionSummary> {
     return this.postJson<ModelVersionSummary, ModelSaveRequest>(
       `models/${encodeURIComponent(id)}/save`, input)
+  }
+
+  /** Delete only the unpublished candidate produced by the current workflow. */
+  deleteModel(id: EntityId): Promise<ModelDeletionResponse> {
+    return this.delete<ModelDeletionResponse>(`models/${encodeURIComponent(id)}`)
+  }
+
+  /** Explicit artifact path for integrations that do not use the compatibility DELETE. */
+  deleteModelArtifacts(id: EntityId): Promise<ModelDeletionResponse> {
+    return this.delete<ModelDeletionResponse>(`models/${encodeURIComponent(id)}/artifacts`)
+  }
+
+  deleteScript(id: EntityId): Promise<ScriptDeletionResponse> {
+    return this.delete<ScriptDeletionResponse>(`scripts/${encodeURIComponent(id)}`)
   }
 
   publishModel(

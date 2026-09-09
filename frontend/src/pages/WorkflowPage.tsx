@@ -13,6 +13,7 @@ import {
   type JsonRecord,
   type ModelTypeCode,
   type ModelVersionDetail,
+  type ModelSaveRequest,
   type PreprocessTask,
   type ScriptContract,
   type TrainingJob,
@@ -160,6 +161,23 @@ function ModelTypeStep({ select }: { select: (type: ModelTypeCode) => void }) {
 
 function displayValue(value: string | number | null | undefined): string {
   return value === null || value === undefined || value === '' ? '未知' : String(value)
+}
+
+function modelSaveRequest(workflow: WorkflowDraft): ModelSaveRequest | null {
+  if (!workflow.modelVersionId || !workflow.modelType) return null
+  return {
+    model_type: workflow.modelType,
+    status: 'READY',
+    training_job_id: workflow.trainingJobId ?? undefined,
+    train_script_id: workflow.trainScriptId ?? workflow.modelVersion?.train_script_id ?? undefined,
+    preprocess_script_id: workflow.preprocessScriptId ?? workflow.modelVersion?.preprocess_script_id ?? null,
+    preprocess_used: Boolean(workflow.preprocessScriptId ?? workflow.modelVersion?.preprocess_used),
+    time_column: workflow.dataset?.time_column ?? workflow.modelVersion?.time_column,
+    feature_columns: workflow.dataset?.feature_columns ?? workflow.modelVersion?.feature_columns,
+    target_column: workflow.dataset?.target_column ?? workflow.modelVersion?.target_column,
+    // Keep the complete chart/comparison envelope when confirming a decision.
+    metrics: (workflow.evaluation ?? workflow.modelVersion?.metrics ?? {}) as JsonRecord,
+  }
 }
 
 function formatBytes(value: number | null | undefined): string {
@@ -998,22 +1016,44 @@ function TrainingStep({
   )
 }
 
+type EvaluationDecision = 'save' | 'delete' | 'publish'
+
 function EvaluationStep({
   back,
-  publish,
   restoring,
 }: {
   back: () => void
-  publish: () => void
   restoring: boolean
 }) {
-  const trainingJobId = useAppStore((state) => state.workflow.trainingJobId)
-  const modelVersionId = useAppStore((state) => state.workflow.modelVersionId)
-  const evaluation = useAppStore((state) => state.workflow.evaluation)
+  const workflow = useAppStore((state) => state.workflow)
   const setContext = useAppStore((state) => state.setWorkflowContext)
+  const resetWorkflow = useAppStore((state) => state.resetWorkflow)
+  const navigate = useNavigate()
+  const trainingJobId = workflow.trainingJobId
+  const modelVersionId = workflow.modelVersionId
+  const evaluation = workflow.evaluation
   const [attempt, setAttempt] = useState(0)
   const [loading, setLoading] = useState(!evaluation)
+  const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [publishOpen, setPublishOpen] = useState(false)
+  const [reason, setReason] = useState('')
+  const workflowRef = useRef(workflow)
+  const mountedRef = useRef(false)
+  const decisionRef = useRef<EvaluationDecision | null>(null)
+  const leaveSaveStartedRef = useRef(false)
+  const selectedScriptIdsRef = useRef<Set<string>>(new Set([
+    workflow.trainScriptId,
+    workflow.preprocessScriptId,
+    workflow.trainingJob?.train_script_id,
+    workflow.trainingJob?.preprocess_script_id,
+    workflow.modelVersion?.train_script_id,
+    workflow.modelVersion?.preprocess_script_id,
+  ].filter((id): id is string => Boolean(id))))
+
+  useEffect(() => {
+    workflowRef.current = workflow
+  }, [workflow])
 
   useEffect(() => {
     if (restoring || !trainingJobId || !modelVersionId || evaluation) return
@@ -1032,11 +1072,158 @@ function EvaluationStep({
     return () => { alive = false }
   }, [attempt, evaluation, modelVersionId, restoring, setContext, trainingJobId])
 
+  const saveCandidate = useCallback(async (snapshot: WorkflowDraft) => {
+    const input = modelSaveRequest(snapshot)
+    if (!input || !snapshot.modelVersionId) {
+      throw new Error('缺少候选模型，无法保存')
+    }
+    return apiClient.saveModel(snapshot.modelVersionId, input)
+  }, [])
+
+  const saveOnLeave = useCallback(async (snapshot: WorkflowDraft, forceClear = false) => {
+    if (leaveSaveStartedRef.current) return
+    leaveSaveStartedRef.current = true
+    try {
+      if (modelSaveRequest(snapshot) && snapshot.modelVersionId) {
+        await saveCandidate(snapshot)
+        window.dispatchEvent(new CustomEvent('model-registry-updated'))
+      }
+    } catch {
+      // The page is already leaving; there is no mounted error surface. The
+      // workflow is still cleared so an abandoned candidate cannot be reused.
+    } finally {
+      // Do not let an unmount from a previous test/session clear a newer
+      // workflow that has already been started in the store.
+      if (forceClear || useAppStore.getState().workflow === snapshot) resetWorkflow()
+    }
+  }, [resetWorkflow, saveCandidate])
+
+  useEffect(() => {
+    [
+      workflow.trainScriptId,
+      workflow.preprocessScriptId,
+      workflow.trainingJob?.train_script_id,
+      workflow.trainingJob?.preprocess_script_id,
+      workflow.modelVersion?.train_script_id,
+      workflow.modelVersion?.preprocess_script_id,
+    ].forEach((id) => {
+      if (id) selectedScriptIdsRef.current.add(id)
+    })
+  }, [workflow])
+
+  useEffect(() => {
+    mountedRef.current = true
+    const onBeforeUnload = () => {
+      if (!decisionRef.current) void saveOnLeave(workflowRef.current)
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload)
+      mountedRef.current = false
+      // Delay by one task so React StrictMode's development-only effect
+      // replay is not mistaken for a real navigation.
+      window.setTimeout(() => {
+        if (!mountedRef.current && !decisionRef.current) {
+          void saveOnLeave(workflowRef.current)
+        }
+      }, 0)
+    }
+  }, [saveOnLeave])
+
+  const finishDecision = useCallback(() => {
+    resetWorkflow()
+    window.dispatchEvent(new CustomEvent('model-registry-updated'))
+    navigate('/', { replace: true })
+  }, [navigate, resetWorkflow])
+
+  const candidate = workflow.modelVersion
+  const lifecycleStatus = upperStatus(candidate?.status)
+  const candidateHealth = upperStatus(candidate?.health_status) === 'HEALTHY' && candidate?.is_abnormal !== true
+    ? 'HEALTHY'
+    : upperStatus(candidate?.health_status) === 'ABNORMAL' || candidate?.is_abnormal === true ? 'ABNORMAL' : 'UNKNOWN'
+  const canDecide = !restoring && !loading && Boolean(evaluation && modelVersionId && candidate)
+  const canPublish = canDecide && candidateHealth === 'HEALTHY'
+    && lifecycleStatus !== 'PUBLISHED'
+
   const retry = () => {
     setError(null)
     setLoading(true)
     setContext({ evaluation: null })
     setAttempt((value) => value + 1)
+  }
+
+  const leaveWithDefaultSave = () => {
+    if (!decisionRef.current) {
+      decisionRef.current = 'save'
+      void saveOnLeave(workflowRef.current, true)
+    }
+    back()
+  }
+
+  const deleteCandidate = async () => {
+    if (!workflow.modelVersionId) throw new Error('缺少候选模型，无法删除')
+    const scriptIds = Array.from(selectedScriptIdsRef.current)
+    await Promise.all([
+      apiClient.deleteModel(workflow.modelVersionId),
+      ...scriptIds.map((id) => apiClient.deleteScript(id)),
+    ])
+  }
+
+  const choose = async (decision: Exclude<EvaluationDecision, 'publish'>) => {
+    if (!canDecide || busy) return
+    decisionRef.current = decision
+    setBusy(true)
+    setError(null)
+    try {
+      if (decision === 'save') await saveCandidate(workflow)
+      else await deleteCandidate()
+      finishDecision()
+    } catch (reasonValue) {
+      decisionRef.current = null
+      setError(errorMessage(reasonValue))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const openPublish = () => {
+    if (!canPublish || busy) return
+    setError(null)
+    setReason('')
+    setPublishOpen(true)
+  }
+
+  const publish = async () => {
+    if (!canPublish || busy || !workflow.modelVersionId) return
+    const trimmedReason = reason.trim()
+    if (!trimmedReason) {
+      setError('发布原因不能为空')
+      return
+    }
+    decisionRef.current = 'publish'
+    setBusy(true)
+    setError(null)
+    try {
+      // Training normally returns READY. Keep the existing save-before-publish
+      // behavior for a legacy DRAFT response, but never publish from save.
+      let publishId = workflow.modelVersionId
+      if (lifecycleStatus !== 'READY') {
+        const saved = await saveCandidate(workflow)
+        publishId = saved.id
+      }
+      await apiClient.publishModel(publishId, {
+        confirmed: true,
+        reason: trimmedReason,
+        idempotency_key: createIdempotencyKey('publish'),
+      })
+      setPublishOpen(false)
+      finishDecision()
+    } catch (reasonValue) {
+      decisionRef.current = null
+      setError(errorMessage(reasonValue))
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -1058,10 +1245,37 @@ function EvaluationStep({
             <span>MAPE 排除：{displayValue(evaluation.metrics.mape_excluded_count)}</span>
           </div>
           <EvaluationDashboard evaluation={evaluation} />
+          <div aria-label="评估结果处理选项" className="evaluation-decision">
+            <div>
+              <strong>评估完成后选择处理方式</strong>
+              <p>保存只登记 READY 候选版本，不会替换当前生产模型；删除会清理本次模型和脚本文件。</p>
+            </div>
+            <div className="publish-actions">
+              <Button disabled={!canDecide || busy} kind="secondary" onClick={() => void choose('save')}>
+                {busy && decisionRef.current === 'save' ? '保存中…' : '保存（仅保存，不生效）'}
+              </Button>
+              <Button disabled={!canDecide || busy} kind="danger" onClick={() => void choose('delete')}>
+                {busy && decisionRef.current === 'delete' ? '删除中…' : '删除本次模型和脚本'}
+              </Button>
+              <Button disabled={!canPublish || busy} onClick={openPublish}>发布</Button>
+            </div>
+            <small>未选择并直接离开本页时，系统默认保存候选版本。</small>
+          </div>
         </>
       )}
       {!loading && !restoring && !evaluation && <div className="empty-state">暂无评估结果，请确认训练任务已成功完成。</div>}
-      <StepActions back={back} next={publish} nextDisabled={restoring || !evaluation} nextLabel="保存与发布" />
+      <StepActions back={leaveWithDefaultSave} />
+      {publishOpen && candidate && (
+        <div className="confirm-overlay" role="presentation">
+          <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="evaluation-publish-dialog-title">
+            <h2 id="evaluation-publish-dialog-title">确认发布</h2>
+            <p>候选版本：<b>{displayValue(candidate.version)}</b></p>
+            <label htmlFor="evaluation-publish-reason">发布原因（必填）</label>
+            <textarea id="evaluation-publish-reason" aria-label="发布原因" value={reason} onChange={(event) => setReason(event.target.value)} />
+            <div className="publish-actions"><Button kind="secondary" onClick={() => setPublishOpen(false)}>取消</Button><Button disabled={busy || !reason.trim()} onClick={() => void publish()}>{busy ? '提交中…' : '确认发布'}</Button></div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
@@ -1944,7 +2158,7 @@ export function WorkflowPage() {
               />
             )
             : requested === 'evaluate'
-              ? <EvaluationStep back={() => go('train')} publish={() => go('publish')} restoring={hydrating} />
+              ? <EvaluationStep back={() => go('train')} restoring={hydrating} />
               : <PublishStep back={() => go('evaluate')} restoring={hydrating} />
 
   const retryRestore = () => {

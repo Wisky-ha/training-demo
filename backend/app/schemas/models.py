@@ -107,6 +107,17 @@ class ModelVersionResponse(BaseModel):
     preprocessor_file_metadata: dict[str, Any] | None = None
 
 
+class ModelDeletionResponse(BaseModel):
+    """Result of discarding an unpublished training candidate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: str = "delete"
+    model_version_id: ResourceId
+    deleted: bool
+    model_artifact_deleted: bool
+
+
 class PublishRequest(BaseModel):
     """Canonical publication command with a parser for old client names."""
 
@@ -278,6 +289,7 @@ class LifecycleOperationResponse(BaseModel):
 __all__ = [
     "AbnormalRequest", "AlertAcknowledgeRequest", "AlertAcknowledgeResponse", "AlertListResponse",
     "AlertStatistics", "LifecycleOperationResponse", "ModelAbnormalRequest", "ModelAlertResponse",
+    "ModelDeletionResponse",
     "ModelSaveRequest", "ModelVersionResponse", "PublishRecordResponse", "PublishRequest",
     "RollbackRequest", "RollbackResponse",
 ]

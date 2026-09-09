@@ -177,6 +177,36 @@ describe('ModelVersionsPage', () => {
     expect(apiClient.getTrainingJob).toHaveBeenCalledWith('job-v2')
   })
 
+  it('switches the detail panel when a different version is clicked', async () => {
+    const candidate = modelFixture({ metrics: { mae: 1.2, rmse: 2.3, mape: 3.4, r2: 0.8 } })
+    const current = currentFixture({ metrics: { mae: 9.8, rmse: 8.7, mape: 7.6, r2: 0.5 } })
+    mockReads([candidate, current])
+
+    renderPage()
+    expect(await screen.findByRole('heading', { name: 'v2' })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'v1' }))
+
+    expect(await screen.findByRole('heading', { name: 'v1' })).toBeTruthy()
+    expect(screen.getByText('9.8')).toBeTruthy()
+    expect(screen.getByText('模型版本管理')).toBeTruthy()
+    expect(apiClient.getModel).toHaveBeenCalledWith('model-current')
+  })
+
+  it('opens the clicked version when the version list row is selected', async () => {
+    const candidate = modelFixture()
+    const current = currentFixture()
+    mockReads([candidate, current])
+
+    renderPage()
+    await screen.findByRole('heading', { name: '电力负荷预测 · 版本列表' })
+
+    fireEvent.click(screen.getByRole('row', { name: /v1/ }))
+
+    expect(await screen.findByRole('heading', { name: 'v1' })).toBeTruthy()
+    expect(apiClient.getModel).toHaveBeenCalledWith('model-current')
+  })
+
   it('consumes the model type query and hash version deep link', async () => {
     const model = modelFixture({ id: 'heat-model', model_type: 'heating_cooling_load', version: 'h1' })
     mockReads([model])
