@@ -314,6 +314,53 @@ function LogList({ logs }: { logs: Array<{ message: string } | string> | undefin
   )
 }
 
+function ScriptOption({
+  script,
+  kind,
+  selected,
+  disabled,
+  removing,
+  onSelect,
+  onRemove,
+}: {
+  script: ScriptContract
+  kind: '预处理' | '训练'
+  selected: boolean
+  disabled?: boolean
+  removing?: boolean
+  onSelect: () => void
+  onRemove: () => void
+}) {
+  return (
+    <div className={`script-option${selected ? ' selected' : ''}`} title={`脚本 ID：${script.id}`}>
+      <button
+        aria-label={`${script.name} · 版本 ${displayValue(script.version)} · 状态 ${upperStatus(script.status) ?? '未知'} · ${selected ? '已选择' : '选择'}`}
+        aria-pressed={selected}
+        className="script-select"
+        disabled={disabled || removing}
+        onClick={onSelect}
+        type="button"
+      >
+        <span className="script-option-copy">
+          <b>{script.name}</b>
+          <small>版本：{displayValue(script.version)} · 状态：{upperStatus(script.status) ?? '未知'} · ID：{displayValue(script.id)}</small>
+        </span>
+        <i className="script-selection">{selected ? '已选择' : '选择'}</i>
+      </button>
+      <button
+        aria-label={`删除${kind}脚本 ${script.name}`}
+        className="script-delete-button"
+        disabled={disabled || removing}
+        onClick={onRemove}
+        title="删除后停用该脚本；历史任务中的脚本快照不受影响"
+        type="button"
+      >
+        {removing ? '删除中…' : '删除'}
+      </button>
+    </div>
+  )
+}
+
 function PreprocessStep({
   back,
   complete,
@@ -337,6 +384,7 @@ function PreprocessStep({
   const [loading, setLoading] = useState(true)
   const [running, setRunning] = useState(false)
   const [uploadingScript, setUploadingScript] = useState(false)
+  const [removingScriptId, setRemovingScriptId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -359,6 +407,7 @@ function PreprocessStep({
   }, [modelType])
 
   const downstreamLocked = Boolean(splitId || trainingJobId || modelVersionId)
+  const controlsLocked = downstreamLocked || running || uploadingScript || Boolean(removingScriptId)
 
   const changeSelection = (nextSkip: boolean, scriptId: string | null = null) => {
     if (downstreamLocked) {
@@ -405,6 +454,27 @@ function PreprocessStep({
       setError(errorMessage(reason))
     } finally {
       setUploadingScript(false)
+    }
+  }
+
+  const removeScript = async (script: ScriptContract) => {
+    if (downstreamLocked) {
+      setError('固定 80/20 划分已经完成，不能删除当前链路中的预处理脚本。')
+      return
+    }
+    setRemovingScriptId(script.id)
+    setError(null)
+    try {
+      const result = await apiClient.disableScript(script.id)
+      if (upperStatus(result.status) !== 'DISABLED') {
+        throw new Error('后端未确认脚本已停用')
+      }
+      setScripts((current) => current.filter((item) => item.id !== script.id))
+      if (selected === script.id) changeSelection(true, null)
+    } catch (reason) {
+      setError(`删除脚本失败：${errorMessage(reason)}`)
+    } finally {
+      setRemovingScriptId(null)
     }
   }
 
@@ -458,31 +528,31 @@ function PreprocessStep({
         <label className={`skip-option${skip ? ' checked' : ''}`}>
           <input
             checked={skip}
-            disabled={downstreamLocked}
+            disabled={controlsLocked}
             onChange={(event) => changeSelection(event.target.checked, event.target.checked ? null : selected)}
             type="checkbox"
           />
           <span><b>跳过预处理</b></span>
         </label>
-        <label className="secondary-button action-button">
+        <label aria-disabled={controlsLocked} className={`secondary-button action-button script-upload-control${controlsLocked ? ' is-disabled' : ''}`}>
           上传预处理脚本
-          <input aria-label="上传预处理脚本" accept=".py,text/x-python" disabled={downstreamLocked} hidden onChange={(event) => void uploadScript(event.target.files?.[0])} type="file" />
+          <input aria-label="上传预处理脚本" accept=".py,text/x-python" disabled={controlsLocked} hidden onChange={(event) => void uploadScript(event.target.files?.[0])} type="file" />
         </label>
       </div>
       {loading && <div className="loading-line"><span className="spinner" />读取 ENABLED 脚本…</div>}
       {!skip && !loading && (
         <div className="script-list">
           {scripts.map((script) => (
-            <button
-              className={`script-option${selected === script.id ? ' selected' : ''}`}
-              disabled={downstreamLocked}
+            <ScriptOption
+              disabled={controlsLocked}
               key={script.id}
-              onClick={() => changeSelection(false, script.id)}
-              type="button"
-            >
-              <span><b>{script.name}</b><small>状态：{upperStatus(script.status) ?? '未知'} · ID：{script.id}</small></span>
-              <i>{selected === script.id ? '已选择' : '选择'}</i>
-            </button>
+              kind="预处理"
+              onRemove={() => void removeScript(script)}
+              onSelect={() => changeSelection(false, script.id)}
+              removing={removingScriptId === script.id}
+              script={script}
+              selected={selected === script.id}
+            />
           ))}
           {!scripts.length && <div className="empty-state compact">暂无 ENABLED 预处理脚本</div>}
         </div>
@@ -511,7 +581,7 @@ function PreprocessStep({
       <StepActions
         back={back}
         next={run}
-        nextDisabled={restoring || running || uploadingScript || downstreamLocked || (!skip && !selected) || !datasetId}
+        nextDisabled={restoring || controlsLocked || (!skip && !selected) || !datasetId}
         nextLabel={downstreamLocked ? '固定划分不可更改' : running ? '执行中…' : taskStatus === 'SUCCEEDED' || taskStatus === 'SKIPPED' ? '重新执行' : '执行并继续'}
       />
     </section>
@@ -598,12 +668,19 @@ function SplitStep({
       ) : (
         <div className="empty-state">尚未创建数据集划分。点击下方按钮生成固定 80/20 结果。</div>
       )}
-      <StepActions
-        back={back}
-        next={split ? () => navigate('/workflow/train') : create}
-        nextDisabled={restoring || loading || !datasetId || !taskId}
-        nextLabel={split ? '继续选择训练脚本' : '生成 80/20 划分'}
-      />
+      <div className="step-actions split-step-actions">
+        <Button kind="secondary" onClick={back}>返回上一步</Button>
+        <Button
+          disabled={restoring || loading || !datasetId || !taskId || Boolean(split)}
+          kind="secondary"
+          onClick={() => void create()}
+        >
+          {loading && !split ? '生成中…' : '生成 80/20 划分'}
+        </Button>
+        <Button disabled={restoring || loading || !split} onClick={() => navigate('/workflow/train')}>
+          下一步 <span aria-hidden="true">→</span>
+        </Button>
+      </div>
     </section>
   )
 }
@@ -635,7 +712,9 @@ function TrainingStep({
   const [scripts, setScripts] = useState<ScriptContract[]>([])
   const [loading, setLoading] = useState(false)
   const [uploadingScript, setUploadingScript] = useState(false)
+  const [removingScriptId, setRemovingScriptId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const controlsLocked = loading || uploadingScript || Boolean(removingScriptId)
   const pollRun = useRef(0)
   const logCursor = useRef<string | undefined>(undefined)
   const logSince = useRef<string | undefined>(undefined)
@@ -811,7 +890,7 @@ function TrainingStep({
     }
   }
 
-  const selectScript = (scriptId: string) => {
+  const selectScript = (scriptId: string | null) => {
     setContext({
       trainScriptId: scriptId,
       trainingJobId: null,
@@ -821,6 +900,24 @@ function TrainingStep({
       modelVersion: null,
     })
   }
+
+  const removeScript = async (script: ScriptContract) => {
+    setRemovingScriptId(script.id)
+    setError(null)
+    try {
+      const result = await apiClient.disableScript(script.id)
+      if (upperStatus(result.status) !== 'DISABLED') {
+        throw new Error('后端未确认脚本已停用')
+      }
+      setScripts((current) => current.filter((item) => item.id !== script.id))
+      if (selected === script.id) selectScript(null)
+    } catch (reason) {
+      setError(`删除脚本失败：${errorMessage(reason)}`)
+    } finally {
+      setRemovingScriptId(null)
+    }
+  }
+
   const terminal = terminalTrainingStatuses.has(jobStatus ?? '')
   const jobModelMatches = Boolean(job && hasOwn(job, 'model_version_id') && job.model_version_id === modelVersionId)
   const canEvaluate = jobStatus === 'SUCCEEDED' && Boolean(modelVersionId) && jobModelMatches
@@ -845,22 +942,23 @@ function TrainingStep({
       </ContractNote>
       {!job && (
         <>
-        <label className="secondary-button action-button">
+        <label aria-disabled={controlsLocked} className={`secondary-button action-button script-upload-control${controlsLocked ? ' is-disabled' : ''}`}>
           上传训练脚本
-          <input aria-label="上传训练脚本" accept=".py,text/x-python" hidden onChange={(event) => void uploadScript(event.target.files?.[0])} type="file" />
+          <input aria-label="上传训练脚本" accept=".py,text/x-python" disabled={controlsLocked} hidden onChange={(event) => void uploadScript(event.target.files?.[0])} type="file" />
         </label>
         {uploadingScript && <div className="loading-line"><span className="spinner" />上传脚本中…</div>}
         <div className="script-list">
           {scripts.map((script) => (
-            <button
-              className={`script-option${selected === script.id ? ' selected' : ''}`}
+            <ScriptOption
+              disabled={controlsLocked}
               key={script.id}
-              onClick={() => selectScript(script.id)}
-              type="button"
-            >
-              <span><b>{script.name}</b><small>状态：{upperStatus(script.status) ?? '未知'} · ID：{script.id}</small></span>
-              <i>{selected === script.id ? '✓' : '选择'}</i>
-            </button>
+              kind="训练"
+              onRemove={() => void removeScript(script)}
+              onSelect={() => selectScript(script.id)}
+              removing={removingScriptId === script.id}
+              script={script}
+              selected={selected === script.id}
+            />
           ))}
           {!scripts.length && <div className="empty-state compact">暂无 ENABLED 训练脚本</div>}
         </div>
@@ -888,7 +986,7 @@ function TrainingStep({
       <StepActions
         back={back}
         next={canEvaluate ? () => navigate('/workflow/evaluate') : start}
-        nextDisabled={restoring || loading || uploadingScript || !selected || !datasetId || !splitId || !preprocessTaskId
+        nextDisabled={restoring || controlsLocked || !selected || !datasetId || !splitId || !preprocessTaskId
           || (job !== null && !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(jobStatus ?? ''))
           || (jobStatus === 'SUCCEEDED' && !canEvaluate)}
         nextLabel={loading ? '提交中…' : jobStatus === 'SUCCEEDED' ? '查看评估结果' : jobStatus === 'FAILED' || jobStatus === 'CANCELLED' ? '重新启动' : job ? '训练进行中…' : '启动训练'}

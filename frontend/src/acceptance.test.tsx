@@ -292,6 +292,84 @@ describe('workflow acceptance flows', () => {
     expect(upload).toHaveBeenCalledWith(expect.objectContaining({ script_type: 'preprocessor', supported_model_types: ['electric_load'] }))
   })
 
+  it('disables and removes a selected preprocessor only after the backend confirms DISABLED', async () => {
+    const script: ScriptContract = { ...trainerFixture, id: 'preprocess-1', name: '清洗脚本', script_type: 'preprocessor' }
+    seedWorkflow({ modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture() })
+    vi.spyOn(apiClient, 'getDataset').mockResolvedValue(datasetFixture())
+    vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [script], pagination: { page: 1, page_size: 20, total: 1, total_pages: 1 } })
+    const disable = vi.spyOn(apiClient, 'disableScript').mockResolvedValue({ ...script, status: 'DISABLED' })
+    renderApp('/workflow/preprocess')
+
+    fireEvent.click(await screen.findByRole('checkbox'))
+    const select = await screen.findByRole('button', { name: /清洗脚本.*选择/ })
+    fireEvent.click(select)
+    fireEvent.click(screen.getByRole('button', { name: '删除预处理脚本 清洗脚本' }))
+
+    await waitFor(() => expect(disable).toHaveBeenCalledWith('preprocess-1'))
+    await waitFor(() => expect(screen.queryByText('清洗脚本')).toBeNull())
+    expect(useAppStore.getState().workflow.preprocessScriptId).toBeNull()
+  })
+
+  it('keeps a training script visible when backend soft-disable fails', async () => {
+    const script = trainerFixture
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(), splitId: 'split-1', split: splitFixture(),
+    })
+    vi.spyOn(apiClient, 'getDataset').mockResolvedValue(datasetFixture())
+    vi.spyOn(apiClient, 'getPreprocessingTask').mockResolvedValue(preprocessFixture())
+    vi.spyOn(apiClient, 'getDatasetSplit').mockResolvedValue(splitFixture())
+    vi.spyOn(apiClient, 'listScripts').mockResolvedValue({ items: [script], pagination: { page: 1, page_size: 20, total: 1, total_pages: 1 } })
+    const disable = vi.spyOn(apiClient, 'disableScript').mockRejectedValue(new ApiError('服务暂不可用', { status: 503 }))
+    renderApp('/workflow/train')
+
+    fireEvent.click(await screen.findByRole('button', { name: /训练脚本.*选择/ }))
+    fireEvent.click(screen.getByRole('button', { name: '删除训练脚本 训练脚本' }))
+
+    await waitFor(() => expect(disable).toHaveBeenCalledWith('trainer-1'))
+    expect((await screen.findByRole('alert')).textContent).toContain('删除脚本失败：服务暂不可用')
+    expect(screen.getByText('训练脚本')).toBeTruthy()
+  })
+
+  it('shows metric units, prototype number notation, and hover details for evaluation charts', async () => {
+    const succeededJob = trainingFixture()
+    const baseEvaluation = evaluationFixture()
+    const evaluation = evaluationFixture({
+      metrics: { ...baseEvaluation.metrics, mae: 14400, rmse: 21150, mape: 1.7321, r2: 0.9967 },
+      chart_data: [
+        { time: '2026-01-01T00:00:00Z', actual: 10000, predicted: 9900, error: 100 },
+        { time: '2026-01-01T01:00:00Z', actual: 11000, predicted: 10800, error: 200 },
+      ],
+      error_data: [
+        { time: '2026-01-01T00:00:00Z', error: 100 },
+        { time: '2026-01-01T01:00:00Z', error: 200 },
+      ],
+    })
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(), splitId: 'split-1', split: splitFixture(),
+      trainScriptId: 'trainer-1', trainingJobId: 'job-1', trainingJob: succeededJob,
+      modelVersionId: 'model-1', modelVersion: baseModel(),
+    })
+    mockWorkflowReads({ job: succeededJob, evaluation })
+    renderApp('/workflow/evaluate')
+
+    const metrics = await screen.findByLabelText('测试集评估指标')
+    expect(metrics.textContent).toContain('1.440 ×10⁴')
+    expect(metrics.textContent).toContain('2.115 ×10⁴')
+    expect(metrics.textContent).toContain('1.7321%')
+    expect(metrics.textContent).not.toContain('e+')
+    expect(screen.getByLabelText('当前生产模型与本次新模型横向指标对比')).toBeTruthy()
+
+    const point = document.querySelector('.chart-point')
+    expect(point).not.toBeNull()
+    fireEvent.mouseEnter(point as Element)
+    expect(await screen.findByText(/实际值：/)).toBeTruthy()
+    const metricRow = screen.getByTitle(/v1 · MAE · 1\.0000/)
+    fireEvent.mouseEnter(metricRow)
+    expect(screen.getAllByRole('status').some((element) => element.textContent?.includes('MAE'))).toBe(true)
+  })
+
   it('shows failed-training retry guidance and submits a retry', async () => {
     const failedJob = trainingFixture({ status: 'FAILED', model_version_id: null, progress_stage: 'FAILED', current_stage: '失败', logs: ['FAILED：训练脚本失败'], error_message: '训练脚本失败' })
     seedWorkflow({
@@ -550,8 +628,46 @@ describe('workflow acceptance flows', () => {
     vi.spyOn(apiClient, 'getDatasetSplit').mockResolvedValue(splitFixture())
     renderApp('/workflow/split')
 
-    const next = await screen.findByRole('button', { name: '继续选择训练脚本' }) as HTMLButtonElement
+    const next = await screen.findByRole('button', { name: '下一步' }) as HTMLButtonElement
     await waitFor(() => expect(next.disabled).toBe(false))
+  })
+
+  it('keeps split navigation disabled until the explicit 80/20 request succeeds', async () => {
+    await act(async () => { await useAppStore.persist.rehydrate() })
+    seedWorkflow({
+      modelType: 'electric_load', datasetId: 'dataset-1', dataset: datasetFixture(),
+      preprocessTaskId: 'task-1', preprocessTask: preprocessFixture(), currentStep: 'split',
+    })
+    vi.spyOn(apiClient, 'getDataset').mockResolvedValue(datasetFixture())
+    vi.spyOn(apiClient, 'getPreprocessingTask').mockResolvedValue(preprocessFixture())
+    const createdSplit = splitFixture()
+    vi.spyOn(apiClient, 'getDatasetSplit').mockImplementation(async () => {
+      if (useAppStore.getState().workflow.splitId) return createdSplit
+      throw new ApiError('尚未划分', { status: 404 })
+    })
+    let resolveSplit!: (value: DatasetSplitResult) => void
+    const pendingSplit = new Promise<DatasetSplitResult>((resolve) => { resolveSplit = resolve })
+    const createSplit = vi.spyOn(apiClient, 'splitDataset').mockReturnValue(pendingSplit)
+    renderApp('/workflow/split')
+
+    const generate = await screen.findByRole('button', { name: '生成 80/20 划分' }) as HTMLButtonElement
+    const next = screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement
+    await waitFor(() => expect(generate.disabled).toBe(false))
+    expect(next.disabled).toBe(true)
+    fireEvent.click(next)
+    expect(screen.getByRole('heading', { name: '数据集划分' })).toBeTruthy()
+
+    fireEvent.click(generate)
+    expect(createSplit).toHaveBeenCalledWith('dataset-1', 'task-1')
+    expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => {
+      resolveSplit(createdSplit)
+      await pendingSplit
+    })
+    await waitFor(() => expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(false))
+
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    expect(await screen.findByRole('heading', { name: '选择训练脚本并启动' })).toBeTruthy()
   })
 
   it('hydrates a training-job deep link into the full workflow ID chain', async () => {
@@ -664,8 +780,8 @@ describe('workflow acceptance flows', () => {
     })))
     fireEvent.click(await screen.findByRole('button', { name: /生成 80\/20 划分/ }))
     await waitFor(() => expect(createSplit).toHaveBeenCalledWith('dataset-1', 'task-1'))
-    fireEvent.click(await screen.findByRole('button', { name: /继续选择训练脚本/ }))
-    fireEvent.click(await screen.findByRole('button', { name: /训练脚本/ }))
+    fireEvent.click(await screen.findByRole('button', { name: '下一步' }))
+    fireEvent.click(await screen.findByRole('button', { name: /训练脚本.*选择/ }))
     fireEvent.click(await screen.findByRole('button', { name: /启动训练/ }))
     await waitFor(() => expect(createTraining).toHaveBeenCalledWith(expect.objectContaining({
       preprocess_script_id: null, preprocessing_task_id: 'task-1',
