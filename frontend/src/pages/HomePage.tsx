@@ -212,6 +212,10 @@ export function HomePage() {
     [alerts, dismissedAlertIds],
   )
   const dismissedAlertCount = alerts.length - visibleAlerts.length
+  // A closed alert is closed: it disappears from the list and from both
+  // counters, so the dashboard never shows a leftover "1 alert" hint for a row
+  // the user already dismissed.
+  const displayedActiveAlertTotal = Math.max(0, activeAlertTotal - dismissedAlertCount)
   const statistics = useMemo(() => {
     const current = [...productionByType.values()]
     return {
@@ -229,11 +233,6 @@ export function HomePage() {
       persistDismissedAlertIds(next)
       return next
     })
-  }, [])
-
-  const restoreDismissedAlerts = useCallback(() => {
-    persistDismissedAlertIds([])
-    setDismissedAlertIds([])
   }, [])
 
   return (
@@ -259,7 +258,7 @@ export function HomePage() {
             </div>
             <div>
               <small>活动告警</small>
-              <strong className={activeAlertTotal > 0 ? 'danger-text' : ''}>{alertsLoading ? '加载中…' : alertsError ? '加载失败' : `${activeAlertTotal} 条 ACTIVE 告警`}</strong>
+              <strong className={displayedActiveAlertTotal > 0 ? 'danger-text' : ''}>{alertsLoading ? '加载中…' : alertsError ? '加载失败' : `${displayedActiveAlertTotal} 条 ACTIVE 告警`}</strong>
             </div>
           </section>
 
@@ -282,16 +281,12 @@ export function HomePage() {
           <section className="registry-panel home-alert-panel">
             <div className="panel-heading">
               <div><h2>活动告警</h2></div>
-              {!alertsLoading && !alertsError && <span className="panel-count">{activeAlertTotal} 条</span>}
+              {!alertsLoading && !alertsError && <span className="panel-count">{visibleAlerts.length} 条</span>}
             </div>
             {alertsLoading && <div className="loading-state"><span className="spinner" />正在加载活动告警…</div>}
             {!alertsLoading && alertsError && <div className="alert-box error" role="alert"><span>{alertsError}</span><button type="button" onClick={() => void loadDashboard()}>重试</button></div>}
-            {!alertsLoading && !alertsError && activeAlertTotal === 0 && <div className="empty-state compact">暂无活动告警</div>}
-            {!alertsLoading && !alertsError && activeAlertTotal > 0 && alerts.length === 0 && <div className="empty-state compact">活动告警明细未提供</div>}
-            {!alertsLoading && !alertsError && alerts.length > 0 && visibleAlerts.length === 0 && <div className="empty-state compact home-alert-dismissed-note">
-              <span>已在本机关闭全部 {dismissedAlertCount} 条告警显示，服务端告警状态未改变。</span>
-              <button className="text-button" onClick={restoreDismissedAlerts} type="button">恢复显示</button>
-            </div>}
+            {!alertsLoading && !alertsError && displayedActiveAlertTotal === 0 && <div className="empty-state compact">暂无活动告警</div>}
+            {!alertsLoading && !alertsError && displayedActiveAlertTotal > 0 && visibleAlerts.length === 0 && <div className="empty-state compact">活动告警明细未提供</div>}
             {!alertsLoading && !alertsError && visibleAlerts.length > 0 && <div className="record-list">{visibleAlerts.map((alert) => {
               const version = alert.model_version_id ? modelById.get(alert.model_version_id) : undefined
               const rollbackFrom = alert.rollback_from ? modelById.get(alert.rollback_from) : undefined
@@ -312,7 +307,7 @@ export function HomePage() {
                   <Link className="text-button" to="/audit">查看审计事件</Link>
                   <button
                     aria-label={`关闭告警显示：${version?.version ?? alert.reason ?? NOT_PROVIDED_TEXT}`}
-                    className="icon-button home-alert-dismiss"
+                    className="home-alert-dismiss"
                     onClick={() => dismissAlert(alert.id)}
                     title="关闭告警显示（仅在本机隐藏，不修改服务端告警状态）"
                     type="button"
@@ -320,10 +315,6 @@ export function HomePage() {
                 </div>
               </div>
             })}</div>}
-            {!alertsLoading && !alertsError && visibleAlerts.length > 0 && dismissedAlertCount > 0 && <div className="home-alert-dismissed-note">
-              <span>已在本机关闭 {dismissedAlertCount} 条告警显示，服务端告警状态未改变。</span>
-              <button className="text-button" onClick={restoreDismissedAlerts} type="button">恢复显示</button>
-            </div>}
           </section>
         </div>
 

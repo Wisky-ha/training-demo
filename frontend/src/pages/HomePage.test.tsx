@@ -194,12 +194,13 @@ describe('HomePage', () => {
     await waitFor(() => {
       expect(screen.queryByText('电力负荷预测 · 原因：漂移')).toBeNull()
     })
-    expect(screen.getByText(/已在本机关闭全部 1 条告警显示/)).toBeTruthy()
+    // Closing removes the alert completely: no leftover row, no leftover
+    // counter and no restore control.
+    expect(screen.getByText('暂无活动告警')).toBeTruthy()
+    expect(screen.getByText('0 条 ACTIVE 告警')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '恢复显示' })).toBeNull()
     // Closing is a local display action; the alert itself must not be modified.
     expect(acknowledge).not.toHaveBeenCalled()
-
-    fireEvent.click(screen.getByRole('button', { name: '恢复显示' }))
-    expect(await screen.findByText('电力负荷预测 · 原因：漂移')).toBeTruthy()
   })
 
   it('keeps a dismissed alert hidden across a remount', async () => {
@@ -217,11 +218,12 @@ describe('HomePage', () => {
 
     const first = renderHome()
     fireEvent.click(await screen.findByRole('button', { name: '关闭告警显示：v4' }))
-    await waitFor(() => expect(screen.getByText(/已在本机关闭全部 1 条告警显示/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('暂无活动告警')).toBeTruthy())
     first.unmount()
 
     renderHome()
-    expect(await screen.findByText(/已在本机关闭全部 1 条告警显示/)).toBeTruthy()
+    await waitFor(() => expect(screen.queryByText('电力负荷预测 · 原因：健康检查异常')).toBeNull())
+    expect(await screen.findByText('暂无活动告警')).toBeTruthy()
   })
 
   it('shows explicit empty states when the dashboard has no data', async () => {

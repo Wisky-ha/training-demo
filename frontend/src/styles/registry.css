@@ -233,9 +233,21 @@
 .home-page .home-alert-panel .record-item small { color: var(--danger); font-size: 11px; line-height: 1.2; }
 .home-page .home-alert-panel .row-actions { display: flex; grid-column: 3; grid-row: 1; justify-content: flex-end; flex-wrap: nowrap; min-width: 0; }
 .home-page .home-alert-panel .secondary-button { min-height: 34px; padding: 7px 9px; font-size: 12px; }
-.home-page .home-alert-panel .home-alert-dismiss { flex: 0 0 auto; width: 30px; height: 30px; font-size: 16px; line-height: 1; }
-.home-page .home-alert-panel .home-alert-dismissed-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 11px; color: var(--text-muted); font-size: 11px; }
-.home-page .home-alert-panel .empty-state.home-alert-dismissed-note { margin-top: 0; }
+.home-page .home-alert-panel .home-alert-dismiss {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.home-page .home-alert-panel .home-alert-dismiss:hover { color: var(--danger); }
 .home-page .home-audit-panel {
   align-self: stretch;
   height: 100%;
@@ -663,3 +675,22 @@
 .audit-page .audit-header .page-title,
 .mcp-page .page-title { margin-top: 11px; }
 .mcp-page .mcp-header { margin-bottom: 18px; }
+
+/* ---------------------------------------------------------------------------
+   Large / fullscreen displays.
+   Every other breakpoint in this project is `max-width`, so nothing previously
+   constrained a fullscreen window: percentage column widths simply stretched
+   edge to edge and the 270px alert rail stayed fixed while the main column grew
+   to several thousand pixels. Bound the content band and scale the rail with
+   the available width instead.
+   --------------------------------------------------------------------------- */
+@media (min-width: 1800px) {
+  .page-content {
+    padding-left: calc((100% - 1680px) / 2);
+    padding-right: calc((100% - 1680px) / 2);
+  }
+  .home-page .home-dashboard-grid { max-width: 1680px; margin: 0 auto; }
+  .home-page .home-dashboard-grid { grid-template-columns: minmax(0, 1fr) 320px; }
+  .model-registry-page .model-version-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); }
+  .mcp-page .mcp-two-column { grid-template-columns: 1fr 1fr; }
+}
