@@ -83,6 +83,34 @@ function alertStatusLabel(status?: ModelAlert['status'] | null) {
   return `${status}（${alertStatusLabels[status] ?? UNKNOWN_TEXT}）`
 }
 
+// Closing an alert only hides it in this browser: the server-side alert stays
+// ACTIVE. The ids are persisted so a refresh does not resurrect a row the user
+// already closed, and the panel always offers a restore control so the hidden
+// state is visible and reversible rather than silent.
+const DISMISSED_ALERTS_STORAGE_KEY = 'model-training-platform.dismissed-alert-ids'
+
+function loadDismissedAlertIds(): string[] {
+  try {
+    const raw = window.localStorage.getItem(DISMISSED_ALERTS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : []
+  } catch {
+    // Unavailable or corrupt storage must never break the dashboard.
+    return []
+  }
+}
+
+function persistDismissedAlertIds(ids: string[]) {
+  try {
+    window.localStorage.setItem(DISMISSED_ALERTS_STORAGE_KEY, JSON.stringify(ids))
+  } catch {
+    // Without storage the dismissal simply lasts for this view.
+  }
+}
+
 function auditObject(event: AuditEvent) {
   const objectId = event.object_id ?? event.model_version_id ?? event.training_job_id ?? NOT_PROVIDED_TEXT
   return {
@@ -104,8 +132,7 @@ export function HomePage() {
   const [modelsError, setModelsError] = useState<string | null>(null)
   const [alertsError, setAlertsError] = useState<string | null>(null)
   const [auditError, setAuditError] = useState<string | null>(null)
-  const [refreshing, setRefreshing] = useState(false)
-  const [acknowledgingAlertId, setAcknowledgingAlertId] = useState<string | null>(null)
+  const [dismissedAlertIds, setDismissedAlertIds] = useState<string[]>(() => loadDismissedAlertIds())
   const mounted = useRef(true)
 
   const loadDashboard = useCallback(async () => {
@@ -180,6 +207,11 @@ export function HomePage() {
     [productionByType],
   )
   const modelById = useMemo(() => new Map(models.map((model) => [model.id, model])), [models])
+  const visibleAlerts = useMemo(
+    () => alerts.filter((alert) => !dismissedAlertIds.includes(alert.id)),
+    [alerts, dismissedAlertIds],
+  )
+  const dismissedAlertCount = alerts.length - visibleAlerts.length
   const statistics = useMemo(() => {
     const current = [...productionByType.values()]
     return {
@@ -190,22 +222,19 @@ export function HomePage() {
     }
   }, [models, productionByType])
 
-  const acknowledge = async (alertId: string) => {
-    setAcknowledgingAlertId(alertId)
-    setAlertsError(null)
-    try {
-      await apiClient.acknowledgeAlert(alertId)
-      setRefreshing(true)
-      await loadDashboard()
-    } catch (reason) {
-      if (mounted.current) setAlertsError(errorMessage(reason))
-    } finally {
-      if (mounted.current) {
-        setAcknowledgingAlertId(null)
-        setRefreshing(false)
-      }
-    }
-  }
+  const dismissAlert = useCallback((alertId: string) => {
+    setDismissedAlertIds((previous) => {
+      if (previous.includes(alertId)) return previous
+      const next = [...previous, alertId]
+      persistDismissedAlertIds(next)
+      return next
+    })
+  }, [])
+
+  const restoreDismissedAlerts = useCallback(() => {
+    persistDismissedAlertIds([])
+    setDismissedAlertIds([])
+  }, [])
 
   return (
     <div className="page-content home-page">
@@ -237,7 +266,6 @@ export function HomePage() {
           <section className="registry-panel home-model-panel">
             <div className="panel-heading">
               <div><h2>当前生产模型</h2></div>
-              {refreshing && <span className="panel-count">同步中…</span>}
             </div>
             {modelsLoading && <div className="loading-state"><span className="spinner" />正在加载生产模型…</div>}
             {!modelsLoading && modelsError && <div className="alert-box error" role="alert"><span>{modelsError}</span><button type="button" onClick={() => void loadDashboard()}>重试</button></div>}
@@ -254,31 +282,48 @@ export function HomePage() {
           <section className="registry-panel home-alert-panel">
             <div className="panel-heading">
               <div><h2>活动告警</h2></div>
-              {!alertsLoading && !alertsError && <span className="panel-count">{activeAlertTotal} 条</span>}
+              {!alertsLoading && !alertsError && <span className="panel-count">{alerts.length > 0 ? `${visibleAlerts.length} 条` : `${activeAlertTotal} 条`}</span>}
             </div>
             {alertsLoading && <div className="loading-state"><span className="spinner" />正在加载活动告警…</div>}
             {!alertsLoading && alertsError && <div className="alert-box error" role="alert"><span>{alertsError}</span><button type="button" onClick={() => void loadDashboard()}>重试</button></div>}
             {!alertsLoading && !alertsError && activeAlertTotal === 0 && <div className="empty-state compact">暂无活动告警</div>}
             {!alertsLoading && !alertsError && activeAlertTotal > 0 && alerts.length === 0 && <div className="empty-state compact">活动告警明细未提供</div>}
-            {!alertsLoading && !alertsError && alerts.length > 0 && <div className="record-list">{alerts.map((alert) => {
+            {!alertsLoading && !alertsError && alerts.length > 0 && visibleAlerts.length === 0 && <div className="empty-state compact home-alert-dismissed-note">
+              <span>已在本机关闭全部 {dismissedAlertCount} 条告警显示，服务端告警状态未改变。</span>
+              <button className="text-button" onClick={restoreDismissedAlerts} type="button">恢复显示</button>
+            </div>}
+            {!alertsLoading && !alertsError && visibleAlerts.length > 0 && <div className="record-list">{visibleAlerts.map((alert) => {
               const version = alert.model_version_id ? modelById.get(alert.model_version_id) : undefined
+              const rollbackFrom = alert.rollback_from ? modelById.get(alert.rollback_from) : undefined
+              const rollbackTo = alert.rollback_to ? modelById.get(alert.rollback_to) : undefined
               const rollback = alert.rollback_from || alert.rollback_to
+              const rollbackLabel = (resolved?: ModelVersionSummary, fallbackId?: string | null) =>
+                resolved?.version ?? (fallbackId ? UNKNOWN_TEXT : NOT_PROVIDED_TEXT)
               return <div className="record-item home-alert-row" key={alert.id}>
                 <div>
-                  <b>{alert.id || NOT_PROVIDED_TEXT}</b>
+                  <b>{version?.version ?? UNKNOWN_TEXT}</b>
                   <div className="home-alert-copy">
-                    <span>{modelTypeName(version?.model_type ?? alert.model_type)} · 版本：{version?.version ?? alert.model_version_id ?? NOT_PROVIDED_TEXT}</span>
-                    <span>原因：{alert.reason || NOT_PROVIDED_TEXT}</span>
+                    <span>{modelTypeName(version?.model_type ?? alert.model_type)} · 原因：{alert.reason || NOT_PROVIDED_TEXT}</span>
                     <small>状态：{alertStatusLabel(alert.status)}</small>
-                    {rollback && <small>回滚：{alert.rollback_from ?? NOT_PROVIDED_TEXT} → {alert.rollback_to ?? NOT_PROVIDED_TEXT}</small>}
+                    {rollback && <small>回滚：{rollbackLabel(rollbackFrom, alert.rollback_from)} → {rollbackLabel(rollbackTo, alert.rollback_to)}</small>}
                   </div>
                 </div>
                 <div className="row-actions">
                   <Link className="text-button" to="/audit">查看审计事件</Link>
-                  {alert.status === 'ACTIVE' && <button className="secondary-button action-button" disabled={acknowledgingAlertId === alert.id || refreshing} onClick={() => void acknowledge(alert.id)} type="button">{acknowledgingAlertId === alert.id ? '确认中…' : `确认告警 ${alert.id}`}</button>}
+                  <button
+                    aria-label={`关闭告警显示：${version?.version ?? alert.reason ?? NOT_PROVIDED_TEXT}`}
+                    className="icon-button home-alert-dismiss"
+                    onClick={() => dismissAlert(alert.id)}
+                    title="关闭告警显示（仅在本机隐藏，不修改服务端告警状态）"
+                    type="button"
+                  >×</button>
                 </div>
               </div>
             })}</div>}
+            {!alertsLoading && !alertsError && visibleAlerts.length > 0 && dismissedAlertCount > 0 && <div className="home-alert-dismissed-note">
+              <span>已在本机关闭 {dismissedAlertCount} 条告警显示，服务端告警状态未改变。</span>
+              <button className="text-button" onClick={restoreDismissedAlerts} type="button">恢复显示</button>
+            </div>}
           </section>
         </div>
 

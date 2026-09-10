@@ -333,7 +333,7 @@ function VersionDetails({
       <div><dt>预处理</dt><dd>{scriptDetail(source, 'preprocess', scriptNames)}</dd></div>
       <div><dt>训练任务</dt><dd>{source.training_job_id ?? NOT_PROVIDED_TEXT}</dd></div>
       <div><dt>当前有效</dt><dd>{currentText}</dd></div>
-      <div><dt>回滚基线</dt><dd>{baselineLoading ? '加载中…' : previousId ? baseline?.version ?? previousId : '无基线'}</dd></div>
+      <div><dt>回滚基线</dt><dd>{baselineLoading ? '加载中…' : baseline ? baseline.version : previousId ? '未找到对应版本' : '无基线'}</dd></div>
     </dl>
     {reason && <div className="alert-box warning" role="alert"><b>异常原因：</b><span>{reason}</span></div>}
     <div className="row-actions version-actions">

@@ -110,6 +110,7 @@ function renderHome() {
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  window.localStorage.clear()
 })
 
 describe('HomePage', () => {
@@ -159,27 +160,68 @@ describe('HomePage', () => {
     expect(screen.getByText('状态：未知')).toBeTruthy()
   })
 
-  it('acknowledges an active alert and refreshes models, alerts, and audit events', async () => {
-    const models = [modelFixture({ id: 'model-1', is_current: true, status: 'PUBLISHED', health_status: 'HEALTHY' })]
-    const listModels = vi.spyOn(apiClient, 'listModels').mockResolvedValue(models)
-    const listAlerts = vi.spyOn(apiClient, 'listAlerts').mockResolvedValue(alertResponse([alertFixture()], 1))
-    const listAuditEvents = vi.spyOn(apiClient, 'listAuditEvents').mockResolvedValue({
+  it('shows version labels instead of ids and hides an alert with the close button', async () => {
+    const models = [
+      modelFixture({ id: 'model-4', version: 'v4', status: 'PUBLISHED', health_status: 'ABNORMAL' }),
+      modelFixture({ id: 'model-5', version: 'v5', status: 'PUBLISHED', is_current: true, health_status: 'HEALTHY' }),
+    ]
+    vi.spyOn(apiClient, 'listModels').mockResolvedValue(models)
+    vi.spyOn(apiClient, 'listAlerts').mockResolvedValue(alertResponse([
+      alertFixture({
+        id: 'ad05087f-72ab-49b2-b5ad-530a382ab807',
+        model_version_id: 'model-4',
+        rollback_from: 'model-4',
+        rollback_to: 'model-5',
+        reason: '漂移',
+      }),
+    ], 1))
+    vi.spyOn(apiClient, 'listAuditEvents').mockResolvedValue({
       items: [], page: 1, page_size: 10, total: 0, has_next: false,
     })
-    const acknowledge = vi.spyOn(apiClient, 'acknowledgeAlert').mockResolvedValue({
-      ...alertFixture({ status: 'ACKNOWLEDGED' }),
-      statistics: { total: 1, active: 0, acknowledged: 1, resolved: 0 },
-    })
+    const acknowledge = vi.spyOn(apiClient, 'acknowledgeAlert')
 
     renderHome()
-    fireEvent.click(await screen.findByRole('button', { name: '确认告警 alert-1' }))
 
-    await waitFor(() => expect(acknowledge).toHaveBeenCalledWith('alert-1'))
+    expect(await screen.findByText('回滚：v4 → v5')).toBeTruthy()
+    expect(screen.getByText('电力负荷预测 · 原因：漂移')).toBeTruthy()
+    // No raw identifier may leak into the rendered alert row.
+    expect(screen.queryByText('ad05087f-72ab-49b2-b5ad-530a382ab807')).toBeNull()
+    expect(screen.queryByText('model-4')).toBeNull()
+    expect(screen.queryByText('model-5')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: '关闭告警显示：v4' }))
+
     await waitFor(() => {
-      expect(listModels).toHaveBeenCalledTimes(2)
-      expect(listAlerts).toHaveBeenCalledTimes(2)
-      expect(listAuditEvents).toHaveBeenCalledTimes(2)
+      expect(screen.queryByText('电力负荷预测 · 原因：漂移')).toBeNull()
     })
+    expect(screen.getByText(/已在本机关闭全部 1 条告警显示/)).toBeTruthy()
+    // Closing is a local display action; the alert itself must not be modified.
+    expect(acknowledge).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: '恢复显示' }))
+    expect(await screen.findByText('电力负荷预测 · 原因：漂移')).toBeTruthy()
+  })
+
+  it('keeps a dismissed alert hidden across a remount', async () => {
+    const models = [
+      modelFixture({ id: 'model-4', version: 'v4', status: 'PUBLISHED', health_status: 'ABNORMAL' }),
+      modelFixture({ id: 'model-5', version: 'v5', status: 'PUBLISHED', is_current: true, health_status: 'HEALTHY' }),
+    ]
+    vi.spyOn(apiClient, 'listModels').mockResolvedValue(models)
+    vi.spyOn(apiClient, 'listAlerts').mockResolvedValue(alertResponse([
+      alertFixture({ model_version_id: 'model-4', rollback_from: 'model-4', rollback_to: 'model-5' }),
+    ], 1))
+    vi.spyOn(apiClient, 'listAuditEvents').mockResolvedValue({
+      items: [], page: 1, page_size: 10, total: 0, has_next: false,
+    })
+
+    const first = renderHome()
+    fireEvent.click(await screen.findByRole('button', { name: '关闭告警显示：v4' }))
+    await waitFor(() => expect(screen.getByText(/已在本机关闭全部 1 条告警显示/)).toBeTruthy())
+    first.unmount()
+
+    renderHome()
+    expect(await screen.findByText(/已在本机关闭全部 1 条告警显示/)).toBeTruthy()
   })
 
   it('shows explicit empty states when the dashboard has no data', async () => {
