@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useSearchParams } from 'react-router-dom'
+import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import { ApiError, apiClient, createIdempotencyKey } from '../api'
 import { MODEL_TYPE_CODES, MODEL_TYPE_NAMES, type ModelAlert, type ModelTypeCode, type ModelVersionDetail, type ModelVersionSummary } from '../types/contracts'
 
@@ -331,7 +331,9 @@ function VersionDetails({
       <div><dt>生命周期</dt><dd>{lifecycleValue(source)}</dd></div>
       <div><dt>健康状态</dt><dd>{healthValue(source)}</dd></div>
       <div><dt>预处理</dt><dd>{scriptDetail(source, 'preprocess', scriptNames)}</dd></div>
-      <div><dt>训练任务</dt><dd>{source.training_job_id ?? NOT_PROVIDED_TEXT}</dd></div>
+      <div><dt>训练任务</dt><dd>{source.training_job_id
+        ? <Link className="text-button" to={`/workflow/train?training_job_id=${encodeURIComponent(source.training_job_id)}`}>查看训练任务</Link>
+        : NOT_PROVIDED_TEXT}</dd></div>
       <div><dt>当前有效</dt><dd>{currentText}</dd></div>
       <div><dt>回滚基线</dt><dd>{baselineLoading ? '加载中…' : baseline ? baseline.version : previousId ? '未找到对应版本' : '无基线'}</dd></div>
     </dl>

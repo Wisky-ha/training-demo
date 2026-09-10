@@ -331,3 +331,22 @@ describe('ModelVersionsPage', () => {
     await waitFor(() => expect(abnormal).toHaveBeenCalledWith('model-unknown', '健康检查失败'))
   })
 })
+
+describe('ModelVersionsPage training job link', () => {
+  it('links to the training workflow instead of showing a raw job id', async () => {
+    vi.spyOn(apiClient, 'listModels').mockResolvedValue([
+      modelFixture({ id: 'model-1', version: 'v1', training_job_id: 'f7353a96-287d-42f0-bad3-eb9d4764c069' }),
+    ])
+    vi.spyOn(apiClient, 'getTrainingJob').mockResolvedValue(
+      { finished_at: null } as unknown as TrainingJob,
+    )
+    renderPage()
+
+    const link = await screen.findByRole('link', { name: '查看训练任务' })
+    expect(link.getAttribute('href')).toBe(
+      '/workflow/train?training_job_id=f7353a96-287d-42f0-bad3-eb9d4764c069',
+    )
+    // The raw identifier must not be rendered as visible text.
+    expect(screen.queryByText('f7353a96-287d-42f0-bad3-eb9d4764c069')).toBeNull()
+  })
+})
