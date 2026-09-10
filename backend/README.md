@@ -156,12 +156,52 @@ CSV 约定：第一列是可解析且不重复的时间，最后一列是有限�
 
 ### 3.5 MCP HTTP transport
 
-后端没有绑定第三方 MCP SDK，而是提供可由 MCP bridge 调用的 HTTP transport：
+后端提供可由 MCP bridge 调用的 HTTP transport：
 
 - `POST /api/mcp/predict`（兼容 `/mcp/predict`）：JSON `{"model_type":"electric_load","model_version":"v1","data":[{"timestamp":"...","outdoor_temp":5,"occupancy":12}]}`。`model_version` 可省略，使用当前健康生产版本；返回 `success`、`model_type`、`model_version`、`preprocess_used`、`predictions` 等服务结果。
 - `POST /api/mcp/mark_model_abnormal`（兼容 `/mcp/mark_model_abnormal`）：JSON `model_type`、`model_version`、`abnormal`、`reason`；返回异常标记、告警和回滚结果。
 
 MCP 输入为记录数组；未知类型/版本、输入 schema 不匹配、模型不可用和预测失败分别返回结构化 `error_code`，不返回 traceback。
+
+### 3.6 最小标准 MCP bridge
+
+`app/mcp_bridge.py` 使用官方 Python MCP SDK，把上述两个 HTTP 路由包装为标准 MCP 工具：
+
+- `predict`：只读预测工具；
+- `mark_model_abnormal`：有副作用的异常标记工具，声明为 destructive tool，只应在用户明确要求后调用。
+
+从仓库根目录启动 stdio bridge（Claude Desktop、Cursor 等桌面客户端通常使用此方式）：
+
+```bash
+MODEL_PLATFORM_BASE_URL=http://127.0.0.1:8000 \\
+python -m backend.app.mcp_bridge --transport stdio
+```
+
+Windows PowerShell：
+
+```powershell
+$env:MODEL_PLATFORM_BASE_URL = "http://127.0.0.1:8000"
+python -m backend.app.mcp_bridge --transport stdio
+```
+
+MCP 客户端配置示例：
+
+```json
+{
+  "mcpServers": {
+    "model-training-platform": {
+      "command": "python",
+      "args": ["/absolute/path/to/backend/app/mcp_bridge.py", "--transport", "stdio"],
+      "env": {
+        "MODEL_PLATFORM_BASE_URL": "http://127.0.0.1:8000",
+        "MODEL_PLATFORM_TIMEOUT_SECONDS": "60"
+      }
+    }
+  }
+}
+```
+
+Bridge 只负责 MCP 工具发现、工具调用和 HTTP 错误转换；模型加载、输入校验、告警及回滚仍由 FastAPI 后端负责。若使用 `--transport streamable-http`，Bridge 默认监听 `127.0.0.1:8001/mcp`，可通过 `MCP_BRIDGE_HOST` 和 `MCP_BRIDGE_PORT` 调整，避免与默认监听 8000 端口的 FastAPI 冲突。
 
 ## 4. 内部演示数据和推荐调用顺序
 
@@ -229,6 +269,7 @@ backend/
 │   ├── training_jobs/          # 训练任务 API
 │   ├── model_router.py         # 版本、发布、异常、告警 API
 │   ├── mcp_router.py           # MCP HTTP transport
+│   ├── mcp_bridge.py           # 标准 MCP 工具发现和 HTTP bridge
 │   ├── services/               # 业务执行与生命周期
 │   ├── db/                     # SQLite/SQLAlchemy 模型、初始化和兼容升级
 │   └── schemas/                # Pydantic 请求/响应合同

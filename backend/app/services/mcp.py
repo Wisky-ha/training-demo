@@ -138,7 +138,18 @@ class MCPModelService:
             with _loaded_module(version.preprocess_script_id, source):
                 instance = joblib.load(BytesIO(raw_state))
             _check_method_signature(instance, "transform")
-            output = instance.transform(frame.copy(deep=True), config)
+            # Prediction requests intentionally omit the training target.  The
+            # platform contract still allows a fitted preprocessor to rely on
+            # the target column's presence while transforming a training-like
+            # frame, so provide an empty target placeholder without exposing
+            # it as a required prediction input.
+            input_frame = frame.copy(deep=True)
+            if (
+                version.target_column
+                and version.target_column not in input_frame.columns
+            ):
+                input_frame[version.target_column] = np.nan
+            output = instance.transform(input_frame, config)
             if not isinstance(output, pd.DataFrame):
                 raise PreprocessingError(
                     "Preprocessor.transform 必须返回 pandas.DataFrame",
