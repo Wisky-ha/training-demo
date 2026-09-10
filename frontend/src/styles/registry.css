@@ -678,19 +678,13 @@
 
 /* ---------------------------------------------------------------------------
    Large / fullscreen displays.
-   Every other breakpoint in this project is `max-width`, so nothing previously
-   constrained a fullscreen window: percentage column widths simply stretched
-   edge to edge and the 270px alert rail stayed fixed while the main column grew
-   to several thousand pixels. Bound the content band and scale the rail with
-   the available width instead.
+   Base layouts are already fluid (fr units), so every page fills the area to
+   the right of the fixed 228px sidebar at any window size. The one large-screen
+   risk is proportional side rails: `minmax(280px, .36fr)` turns the home alert
+   rail into a ~1300px column on a 4K window. Pin that rail to a clamp()ed
+   width and let the main column absorb the remaining space.
    --------------------------------------------------------------------------- */
 @media (min-width: 1800px) {
-  .page-content {
-    padding-left: calc((100% - 1680px) / 2);
-    padding-right: calc((100% - 1680px) / 2);
-  }
-  .home-page .home-dashboard-grid { max-width: 1680px; margin: 0 auto; }
-  .home-page .home-dashboard-grid { grid-template-columns: minmax(0, 1fr) 320px; }
-  .model-registry-page .model-version-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); }
-  .mcp-page .mcp-two-column { grid-template-columns: 1fr 1fr; }
+  .page-content { padding: 28px 34px 36px; }
+  .home-page .home-dashboard-grid { grid-template-columns: minmax(0, 1fr) clamp(320px, 18vw, 420px); }
 }
