@@ -131,3 +131,67 @@ def test_cooling_trainer_uses_lightgbm_and_runs_through_the_platform_executor():
     predictions = np.asarray(result.model.predict(X_test), dtype=float)
     assert predictions.shape == (len(X_test),)
     assert np.isfinite(predictions).all()
+
+
+def _load_climate_years_module():
+    import importlib.util
+    import sys
+
+    path = BACKEND_ROOT / "demo" / "cooling_load" / "build_climate_years.py"
+    spec = importlib.util.spec_from_file_location("cooling_climate_years", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
+
+
+def test_climate_years_feature_list_excludes_every_target_column():
+    module = _load_climate_years_module()
+    targets = {module.TARGET, module.BUILDING_TARGET, module.DATACENTER_TARGET}
+    assert targets.isdisjoint(module.FEATURES)
+    assert "lag_1" in module.FEATURES and "lag_24" in module.FEATURES
+
+
+def test_climate_years_platform_layout_is_unique_and_non_overlapping():
+    module = _load_climate_years_module()
+    rows = []
+    for site_index, scenario in enumerate(("AAA", "BBB")):
+        for hour in range(1, 25):
+            rows.append({
+                "sequence_index": site_index * 24 + hour,
+                "scenario": scenario,
+                "scenario_row": hour,
+                "month": 1,
+                "day": 1 + hour // 24,
+                "hour": hour,
+                **{
+                    name: float(hour)
+                    for name in module.FEATURES
+                    if not name.startswith("lag") and name not in ("month", "day", "hour")
+                },
+                "lag_1": float(hour),
+                "lag_24": float(hour),
+                module.BUILDING_TARGET: float(hour),
+                module.DATACENTER_TARGET: 0.0,
+                module.TARGET: float(hour * 10),
+            })
+    raw = pd.DataFrame(rows)
+
+    platform, mapping = module.build_platform(raw)
+
+    assert platform.columns[0] == "timestamp"
+    assert platform.columns[-1] == module.TARGET
+    assert set(mapping) == {"AAA", "BBB"}
+    assert pd.api.types.is_numeric_dtype(platform["scenario_code"])
+    timestamps = pd.to_datetime(platform["timestamp"], errors="coerce", format="mixed")
+    assert timestamps.notna().all()
+    assert timestamps.is_unique
+    assert timestamps.is_monotonic_increasing
+    assert np.isfinite(platform[module.TARGET].to_numpy(dtype=float)).all()
+    # The two scenario blocks must not share any hour of the derived timeline.
+    by_scenario = platform.groupby("scenario_code")["timestamp"].apply(list)
+    assert set(by_scenario.loc[0]).isdisjoint(set(by_scenario.loc[1]))
