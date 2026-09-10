@@ -282,7 +282,7 @@ export function HomePage() {
           <section className="registry-panel home-alert-panel">
             <div className="panel-heading">
               <div><h2>活动告警</h2></div>
-              {!alertsLoading && !alertsError && <span className="panel-count">{alerts.length > 0 ? `${visibleAlerts.length} 条` : `${activeAlertTotal} 条`}</span>}
+              {!alertsLoading && !alertsError && <span className="panel-count">{activeAlertTotal} 条</span>}
             </div>
             {alertsLoading && <div className="loading-state"><span className="spinner" />正在加载活动告警…</div>}
             {!alertsLoading && alertsError && <div className="alert-box error" role="alert"><span>{alertsError}</span><button type="button" onClick={() => void loadDashboard()}>重试</button></div>}
